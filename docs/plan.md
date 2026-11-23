@@ -93,7 +93,8 @@ Zig 单进程
   "session_idle_hours": 24,
   "max_connections": 64,
   "root": "/srv/work",
-  "max_sessions": 16
+  "max_sessions": 16,
+  "pty_idle_minutes": 30
 }
 ```
 
@@ -108,6 +109,7 @@ Zig 单进程
 | 最大连接数 | `max_connections` | `MYTTY_MAX_CONNECTIONS` | `--max-connections` |
 | 文件根 | `root` | `MYTTY_ROOT` | `--root` |
 | 会话上限 | `max_sessions` | `MYTTY_MAX_SESSIONS` | `--max-sessions` |
+| 断开后保留 shell（分钟） | `pty_idle_minutes` | `MYTTY_PTY_IDLE_MINUTES` | `--pty-idle-minutes` |
 
 未显式配置 shell 时，才用进程 `$SHELL` 兜底（避免环境变量意外覆盖配置文件）。
 未配置密码时，启动阶段生成随机密码并打印一次；所有功能都要求登录。
@@ -120,12 +122,17 @@ Zig 单进程
 
 - 浏览器 → 服务端
   - **二进制帧**：原始键盘/粘贴字节（前端按 8 KiB 切）。
-  - **文本帧**：JSON 控制，目前只有 `{"t":"resize","cols":120,"rows":40}`。
+  - **文本帧**：`{"t":"resize","cols":120,"rows":40}`、`{"t":"close"}`（结束该会话）。
 - 服务端 → 浏览器
-  - **二进制帧**：PTY 原始输出，前端直接 `term.write(Uint8Array)`。
-  - **文本帧**：`{"t":"ready","pid":N}`、`{"t":"exit"}`、`{"t":"error"}`。
+  - **二进制帧**：PTY 原始输出，前端直接 `term.write(Uint8Array)`，并按字节长度累加 `offset`。
+  - **文本帧**：
+    - `{"t":"ready","session":"<32 hex>","offset":N}`：回放前发送；客户端以 N 作为起点。
+    - `{"t":"gap","lost":N}`：环形缓冲已丢弃 N 字节，只回放当前最旧的数据，不 reset 终端。
+    - `{"t":"exit"}` / `{"t":"error","reason":"too_many_sessions"|"pty_failed"}`。
 
-一个 WebSocket = 一个 PTY = 一个分屏 pane。分屏即开多条 WS，互不影响。
+一个 WebSocket 是某个 PTY 会话的**前端**，不是会话本身。连接带
+`?session=<id>&offset=<已收字节数>` 时服务端只回放缺失部分；不带 `session` 就新建。
+断开后 PTY 继续运行（默认保留 30 分钟），刷新/断线重连不会重建 Terminal。
 
 ### 5.2 文件 API（HTTP + JSON）
 
@@ -165,7 +172,7 @@ WebSocket 升级既接受会话 Cookie，也接受 `?ticket=`（一次性）。
 - 只监听回环（默认）；所有功能都要求登录会话。
 - 密码定长时间比较；登录失败固定延迟 250ms + 按 IP 失败封禁（5 次/10 分钟 → 5 分钟）。
 - 会话 Cookie：`HttpOnly; SameSite=Strict; Path=/`，反向代理为 HTTPS 时加 `Secure`。
-- 会话有空闲超时；后台每 5 分钟清理一次过期会话/票据。
+- 会话有空闲超时；后台每 60 秒清理一次过期登录会话/票据和空闲 PTY 会话。
 - WebSocket 票据 30 秒、一次性；带 Origin 时必须与 Host 一致；注销立即失效。
 - HTTP 阶段 30 秒读写超时；并发连接上限；SIGTERM/SIGINT 优雅退出并回收 PTY。
 - 文件 API 以启动时 `realpath(root)` 为唯一边界；每个目标是 `realPathFileAlloc`
@@ -284,6 +291,9 @@ my-tty/
 - [x] `--check-config`、`my-tty.example.json`、`scripts/build-release.sh`（strip）。
 - [x] 复制/粘贴快捷键：`Ctrl+C` 有选区复制/无选区中断，`Ctrl+V`/`Ctrl+Shift+V`/
       `Shift+Insert` 原生粘贴，`Ctrl+Shift+C` 挡掉 DevTools 快捷键（浏览器回归覆盖）。
+- [x] 内置会话保持（无 tmux）：每会话独立 PTY + 512 KiB 环形缓冲 + offset 增量回放；
+      `ready/gap/exit` 协议；`{t:"close"}` 结束会话；断线保留 `pty_idle_minutes`。
+      浏览器回归覆盖刷新重连、页内重连保留选区、复制/粘贴不受影响、关闭分屏结束会话。
 - [ ] README 完整化；`docs/research.md` 归档。
 - [ ] 二进制体积与启动时间记录。
 
@@ -293,10 +303,12 @@ my-tty/
 zig build
 zig test src/tests.zig
 ./scripts/smoke.sh
+./scripts/browser_test.sh   # 需要先 npm --prefix tests/browser ci
 ```
 
 浏览器自动化（本机已验证）：headless Chromium 下断言 1/2/3/4 屏尺寸、
-两个 pane 的输出互不串流、文件编辑保存落盘、页面无 console error。
+两个 pane 的输出互不串流、文件编辑保存落盘、分片上传/下载、复制粘贴、
+会话保持（刷新/页内重连）、页面无 console error。
 
 仍需人工确认：DOM 终端里的鼠标选择体验、
 中文/多行粘贴、窗口缩放后 `stty size` 与可见行列一致。

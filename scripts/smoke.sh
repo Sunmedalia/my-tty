@@ -139,6 +139,10 @@ echo "== websocket + pty =="
 node scripts/ws_test.mjs "$BASE" "$PASSWORD" "MYTTY_RESULT_OK" "Linux" "/dev/pts/"
 pass "websocket + pty"
 
+echo "== session resume =="
+node scripts/session_test.mjs "$BASE" "$PASSWORD"
+pass "session resume"
+
 echo "== logout =="
 curl -fsS -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE/api/auth/logout" >/dev/null
 code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$API/list?path=")

@@ -58,6 +58,8 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
 
     var auth_state = auth.Auth.init(io, cfg.password orelse unreachable, cfg.session_ttl_days, cfg.session_idle_hours);
     var limiter: LoginLimiter = .{ .io = io };
+    var manager = session.Manager.init(io, gpa, cfg);
+    defer manager.deinit();
 
     const addr = try net.IpAddress.parseIp4(cfg.host, cfg.port);
     var listener = try addr.listen(io, .{ .reuse_address = true });
@@ -67,10 +69,9 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
 
     installSignalHandlers();
 
-    const maint = std.Thread.spawn(.{}, maintenance, .{ io, &auth_state }) catch null;
-    _ = maint;
+    const maint = std.Thread.spawn(.{}, maintenance, .{ io, &auth_state, &manager }) catch null;
 
-    std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  root={s}  会话={d}天/{d}h  连接≤{d}\n", .{
+    std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  root={s}  会话={d}天/{d}h  连接≤{d}  保持={d}分钟\n", .{
         cfg.host,
         cfg.port,
         cfg.shell,
@@ -78,6 +79,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
         cfg.session_ttl_days,
         cfg.session_idle_hours,
         cfg.max_connections,
+        cfg.pty_idle_minutes,
     });
 
     while (true) {
@@ -103,7 +105,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
         setSocketTimeout(stream.socket.handle, posix.SO.SNDTIMEO, io_timeout_seconds);
 
         const thread = std.Thread.spawn(.{}, connectionMain, .{
-            io, gpa, stream, cfg, &fs, &auth_state, &limiter,
+            io, gpa, stream, cfg, &fs, &auth_state, &limiter, &manager,
         }) catch {
             _ = active_connections.fetchSub(1, .acq_rel);
             stream.close(io);
@@ -113,14 +115,22 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     }
 
     std.debug.print("正在退出：回收 shell…\n", .{});
-    session.killAll(io);
+    shutting_down.store(true, .release);
+    if (maint) |t| t.join();
+    manager.shutdown();
     std.debug.print("已退出\n", .{});
 }
 
-fn maintenance(io: Io, auth_state: *auth.Auth) void {
+fn maintenance(io: Io, auth_state: *auth.Auth, manager: *session.Manager) void {
+    var ticks: u32 = 0;
+    // 1 秒一跳，便于 SIGTERM 时尽快 join；每 60 跳做一次清理。
     while (!shutting_down.load(.acquire)) {
-        Io.sleep(io, Io.Duration.fromSeconds(300), .real) catch return;
+        Io.sleep(io, Io.Duration.fromSeconds(1), .real) catch return;
+        if (shutting_down.load(.acquire)) break;
+        ticks += 1;
+        if (ticks % 60 != 0) continue;
         auth_state.sweep();
+        manager.sweep();
     }
 }
 
@@ -132,6 +142,7 @@ fn connectionMain(
     fs: *const fsapi.Fs,
     auth_state: *auth.Auth,
     limiter: *LoginLimiter,
+    manager: *session.Manager,
 ) void {
     defer {
         _ = active_connections.fetchSub(1, .acq_rel);
@@ -166,10 +177,11 @@ fn connectionMain(
                 }
                 // 终端可能空闲很久，升级后取消读超时。
                 setSocketTimeout(stream.socket.handle, posix.SO.RCVTIMEO, 0);
+                const sid = session.parseSessionId(util.queryParam(request.head.target, "session"));
+                const resume_offset = session.parseOffset(util.queryParam(request.head.target, "offset"));
                 var ws = request.respondWebSocket(.{ .key = key }) catch return;
-                session.run(io, gpa, &ws, &stream, cfg) catch |err| {
+                session.serve(io, manager, &ws, &stream, sid, resume_offset) catch |err| {
                     std.debug.print("会话结束: {t}\n", .{err});
-                    ws.writeMessage("{\"t\":\"error\"}", .text) catch {};
                 };
                 return;
             },

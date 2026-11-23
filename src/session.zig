@@ -1,13 +1,20 @@
-//! 一个 WebSocket = 一个 PTY shell 会话。
+//! 常驻 PTY 会话管理器（不依赖任何终端复用器）。
 //!
-//! 线程模型（每会话两条，够用且好推理）：
-//!   - 连接线程：读 WebSocket 消息 -> 写 PTY；负责清理与回收子进程。
-//!   - pump 线程：读 PTY -> 写二进制帧给浏览器；shell 退出时 shutdown 套接字，
-//!     让连接线程从阻塞读里醒过来。
+//! WebSocket 只是会话的一个“前端”：断开后 PTY 继续运行，输出进入每会话
+//! 512 KiB 的环形缓冲。重连时客户端带上会话 id 和已收到的字节偏移，服务端
+//! 只回放缺失部分（不会 reset 终端，因此不影响文本选择/复制）。
 //!
-//! 帧约定：
-//!   - 浏览器 -> 服务端：二进制帧 = 键盘输入；文本帧 = JSON 控制指令。
-//!   - 服务端 -> 浏览器：二进制帧 = 终端输出；文本帧 = JSON 状态事件。
+//! 线程模型：
+//!   - 每个会话一条 pump 线程，只负责读 PTY、写环形缓冲、转发给当前前端。
+//!   - 每条 WebSocket 连接线程负责读输入、resize、以及最后的 detach。
+//!
+//! 协议（文本帧为 JSON，二进制帧为终端数据）：
+//!   ready {"t":"ready","session":"<32 hex>","offset":N}
+//!         在回放前发送；客户端把 offset 设为 N，之后按二进制帧长度累加。
+//!   gap   {"t":"gap","lost":N}   缓冲区已丢弃 N 字节，从当前最旧的数据开始回放。
+//!   exit  {"t":"exit"}           shell 已退出。
+//!   error {"t":"error","reason":"..."}
+//! 客户端 → 服务端：二进制 = 输入；文本 {t:"resize",cols,rows} 或 {t:"close"}。
 
 const std = @import("std");
 const http = std.http;
@@ -21,156 +28,596 @@ const config = @import("config.zig");
 
 const Allocator = std.mem.Allocator;
 
-/// 同时在线的会话数；连接线程在创建 PTY 前先占位。
-var live_sessions = std.atomic.Value(u32).init(0);
+const ring_capacity: usize = 512 * 1024;
+const closed_grace_ns: i96 = 60 * std.time.ns_per_s;
 
-/// 当前活着的 shell，用于 SIGTERM 时统一回收。
-var registry_mutex: Io.Mutex = .init;
-var registry: [128]posix.pid_t = @splat(-1);
-
-fn registerChild(io: Io, pid: posix.pid_t) void {
-    registry_mutex.lockUncancelable(io);
-    defer registry_mutex.unlock(io);
-    for (&registry) |*slot| {
-        if (slot.* < 0) {
-            slot.* = pid;
-            return;
-        }
-    }
-}
-
-fn unregisterChild(io: Io, pid: posix.pid_t) void {
-    registry_mutex.lockUncancelable(io);
-    defer registry_mutex.unlock(io);
-    for (&registry) |*slot| {
-        if (slot.* == pid) {
-            slot.* = -1;
-            return;
-        }
-    }
-}
-
-pub fn killAll(io: Io) void {
-    registry_mutex.lockUncancelable(io);
-    defer registry_mutex.unlock(io);
-    for (registry) |pid| {
-        if (pid > 0) {
-            _ = linux.kill(pid, .HUP);
-            _ = linux.kill(pid, .TERM);
-        }
-    }
-}
-
-pub const SessionError = error{ TooManySessions, PtySpawnFailed };
-
-pub const Control = struct {
-    t: []const u8 = "",
-    cols: ?u16 = null,
-    rows: ?u16 = null,
-};
-
-pub fn parseControl(alloc: Allocator, data: []const u8) !std.json.Parsed(Control) {
-    return std.json.parseFromSlice(Control, alloc, data, .{ .ignore_unknown_fields = true });
-}
-
-pub fn run(
+pub const Attachment = struct {
     io: Io,
-    gpa: Allocator,
     ws: *http.Server.WebSocket,
     stream: *const net.Stream,
+    session: ?*Session = null,
+    send_mutex: Io.Mutex = .init,
+    alive: bool = true,
+
+    fn sendRaw(self: *Attachment, data: []const u8, op: http.Server.WebSocket.Opcode) !void {
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+        try self.ws.writeMessage(data, op);
+    }
+
+    fn sendText(self: *Attachment, data: []const u8) !void {
+        return self.sendRaw(data, .text);
+    }
+};
+
+pub const Manager = struct {
+    io: Io,
+    gpa: Allocator,
     cfg: *const config.Config,
-) !void {
-    const previous = live_sessions.fetchAdd(1, .acq_rel);
-    defer _ = live_sessions.fetchSub(1, .acq_rel);
-    if (previous >= cfg.max_sessions) return error.TooManySessions;
+    mutex: Io.Mutex = .init,
+    sessions: std.ArrayList(*Session) = .empty,
+    /// 当前还挂着的 WebSocket 前端数量；退出时用来判断是否可以安全释放会话。
+    live_attachments: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
-    const spawned = pty.spawn(gpa, .{
-        .shell = cfg.shell,
-        .environ = cfg.environ,
-        .cols = 80,
-        .rows = 24,
-    }) catch return error.PtySpawnFailed;
-    registerChild(io, spawned.child);
-    defer unregisterChild(io, spawned.child);
+    pub fn init(io: Io, gpa: Allocator, cfg: *const config.Config) Manager {
+        return .{ .io = io, .gpa = gpa, .cfg = cfg };
+    }
 
-    var session: Session = .{
-        .io = io,
-        .ws = ws,
-        .stream = stream,
-        .master = spawned.master,
-        .child = spawned.child,
-    };
-    defer session.deinit();
+    /// 只释放列表本身；会话应当在 shutdown() 里清理干净。
+    pub fn deinit(self: *Manager) void {
+        self.sessions.deinit(self.gpa);
+    }
 
-    session.pump_thread = std.Thread.spawn(.{}, pump, .{&session}) catch null;
+    fn now(self: *Manager) i96 {
+        return Io.Clock.real.now(self.io).nanoseconds;
+    }
 
-    var hello_buf: [96]u8 = undefined;
-    const hello = std.fmt.bufPrint(&hello_buf, "{{\"t\":\"ready\",\"pid\":{d}}}", .{spawned.child}) catch "{\"t\":\"ready\"}";
-    try session.sendText(hello);
+    /// 找到已有会话就 attach；否则创建新会话。整个过程持有 manager 锁，
+    /// 保证 sweep 不会在 attach 期间释放会话。
+    pub fn attach(
+        self: *Manager,
+        att: *Attachment,
+        session_id: ?[16]u8,
+        offset: u64,
+    ) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
-    while (true) {
-        const msg = ws.readSmallMessage() catch return;
-        switch (msg.opcode) {
-            .ping => session.sendRaw(msg.data, .pong) catch return,
-            .binary => pty.writeAll(session.master, msg.data) catch return,
-            .text => session.onControl(msg.data) catch {},
-            else => return,
+        const session = blk: {
+            if (session_id) |sid| {
+                if (self.findLocked(sid)) |found| {
+                    if (!found.closed) break :blk found;
+                    // shell 已经退出：旧会话没有恢复价值。但如果旧前端还没 detach，
+                    // 不能现在 free，交给 sweep 在连接退出后回收。
+                    found.mutex.lockUncancelable(self.io);
+                    const busy = found.attachment != null;
+                    found.mutex.unlock(self.io);
+                    if (!busy) self.destroyLocked(found);
+                }
+            }
+            break :blk try self.createLocked();
+        };
+
+        session.mutex.lockUncancelable(self.io);
+        defer session.mutex.unlock(self.io);
+
+        // 同一个会话被另一个前端接管时，先踢掉旧的。
+        if (session.attachment) |old| {
+            old.alive = false;
+            old.stream.shutdown(self.io, .both) catch {};
+            session.attachment = null;
         }
+
+        const total = session.total;
+        const start_abs = session.start_abs;
+        var from = offset;
+        if (from > total) from = total;
+        var gap_lost: u64 = 0;
+        if (from < start_abs) {
+            gap_lost = start_abs - from;
+            from = start_abs;
+        }
+
+        att.session = session;
+        session.last_activity_ns = self.now();
+        _ = self.live_attachments.fetchAdd(1, .acq_rel);
+        errdefer {
+            att.session = null;
+            _ = self.live_attachments.fetchSub(1, .acq_rel);
+        }
+
+        var hello_buf: [128]u8 = undefined;
+        const hello = std.fmt.bufPrint(
+            &hello_buf,
+            "{{\"t\":\"ready\",\"session\":\"{s}\",\"offset\":{d}}}",
+            .{ std.fmt.bytesToHex(session.id, .lower), from },
+        ) catch "{\"t\":\"ready\",\"offset\":0}";
+        try att.sendText(hello);
+
+        if (gap_lost > 0) {
+            var gap_buf: [80]u8 = undefined;
+            const note = std.fmt.bufPrint(&gap_buf, "{{\"t\":\"gap\",\"lost\":{d}}}", .{gap_lost}) catch
+                "{\"t\":\"gap\"}";
+            att.sendText(note) catch {};
+        }
+
+        const count: usize = @intCast(total - from);
+        if (count > 0) {
+            try session.sendRing(att, @intCast(from - start_abs), count);
+        }
+
+        session.attachment = att;
+    }
+
+    pub fn detach(self: *Manager, att: *Attachment) void {
+        const session = att.session orelse return;
+        att.session = null;
+
+        session.mutex.lockUncancelable(self.io);
+        if (session.attachment == att) session.attachment = null;
+        const detached = session.attachment == null;
+        session.last_activity_ns = self.now();
+        session.mutex.unlock(self.io);
+
+        _ = self.live_attachments.fetchSub(1, .acq_rel);
+
+        if (detached and self.cfg.pty_idle_minutes == 0) {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            session.mutex.lockUncancelable(self.io);
+            const still_idle = session.attachment == null;
+            session.mutex.unlock(self.io);
+            if (still_idle and self.containsLocked(session)) self.destroyLocked(session);
+        }
+    }
+
+    /// 前端主动 {t:"close"}：立刻结束 shell，而不是留在后台等 TTL。
+    pub fn destroyAttached(self: *Manager, att: *Attachment) void {
+        const session = att.session orelse return;
+        att.session = null;
+        att.alive = false;
+
+        session.mutex.lockUncancelable(self.io);
+        const was_current = session.attachment == att;
+        if (was_current) session.attachment = null;
+        session.mutex.unlock(self.io);
+
+        _ = self.live_attachments.fetchSub(1, .acq_rel);
+
+        // 已经被别的连接接管时，不能替对方把会话杀掉。
+        if (!was_current) return;
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.containsLocked(session)) self.destroyLocked(session);
+    }
+
+    /// 定期回收：没有前端且空闲超过 pty_idle_minutes 的会话，以及已经退出的会话。
+    pub fn sweep(self: *Manager) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        const ts = self.now();
+        const idle_minutes = self.cfg.pty_idle_minutes;
+        const idle_ns: i96 = @as(i96, @intCast(idle_minutes)) * 60 * @as(i96, std.time.ns_per_s);
+
+        var i: usize = 0;
+        while (i < self.sessions.items.len) {
+            const s = self.sessions.items[i];
+            s.mutex.lockUncancelable(self.io);
+            const detached = s.attachment == null;
+            const expired = if (s.closed)
+                ts - s.closed_ns > closed_grace_ns
+            else if (idle_minutes == 0)
+                true
+            else
+                ts - s.last_activity_ns > idle_ns;
+            s.mutex.unlock(self.io);
+
+            if (detached and expired) {
+                self.destroyLocked(s);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// 优雅退出：先叫醒所有前端连接，等它们 detach，再回收会话。
+    /// 超时仍有连接没退出时宁可不释放内存，也不冒 use-after-free 的风险。
+    pub fn shutdown(self: *Manager) void {
+        self.mutex.lockUncancelable(self.io);
+        for (self.sessions.items) |s| {
+            s.mutex.lockUncancelable(self.io);
+            if (s.attachment) |att| {
+                att.alive = false;
+                att.stream.shutdown(self.io, .both) catch {};
+            }
+            s.mutex.unlock(self.io);
+        }
+        self.mutex.unlock(self.io);
+
+        var waited: u32 = 0;
+        while (self.live_attachments.load(.acquire) > 0 and waited < 200) : (waited += 1) {
+            Io.sleep(self.io, Io.Duration.fromMilliseconds(10), .real) catch break;
+        }
+
+        if (self.live_attachments.load(.acquire) == 0) {
+            self.killAll();
+        } else {
+            // 连接线程还没退干净：只杀 shell，不释放会话结构。
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            for (self.sessions.items) |s| _ = linux.kill(-s.child, .KILL);
+        }
+    }
+
+    pub fn killAll(self: *Manager) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (self.sessions.items.len > 0) {
+            const s = self.sessions.items[self.sessions.items.len - 1];
+            self.destroyLocked(s);
+        }
+    }
+
+    fn containsLocked(self: *Manager, needle: *Session) bool {
+        for (self.sessions.items) |s| if (s == needle) return true;
+        return false;
+    }
+
+    fn findLocked(self: *Manager, id: [16]u8) ?*Session {
+        for (self.sessions.items) |s| {
+            if (std.mem.eql(u8, &s.id, &id)) return s;
+        }
+        return null;
+    }
+
+    /// 优先淘汰已退出/最久没活动的空闲会话。
+    fn evictOneLocked(self: *Manager) ?*Session {
+        var victim: ?*Session = null;
+        var victim_score: i96 = std.math.maxInt(i96);
+        for (self.sessions.items) |s| {
+            s.mutex.lockUncancelable(self.io);
+            const free = s.attachment == null;
+            const score: i96 = if (s.closed) 0 else s.last_activity_ns;
+            s.mutex.unlock(self.io);
+            if (free and score < victim_score) {
+                victim_score = score;
+                victim = s;
+            }
+        }
+        return victim;
+    }
+
+    fn createLocked(self: *Manager) !*Session {
+        if (self.sessions.items.len >= self.cfg.max_sessions) {
+            if (self.evictOneLocked()) |victim| {
+                self.destroyLocked(victim);
+            } else {
+                return error.TooManySessions;
+            }
+        }
+
+        const spawned = pty.spawn(self.gpa, .{
+            .shell = self.cfg.shell,
+            .environ = self.cfg.environ,
+            .cols = 80,
+            .rows = 24,
+        }) catch return error.PtySpawnFailed;
+
+        const s = self.gpa.create(Session) catch {
+            killChild(spawned.child);
+            _ = linux.close(spawned.master);
+            return error.OutOfMemory;
+        };
+        const buf = self.gpa.alloc(u8, ring_capacity) catch {
+            self.gpa.destroy(s);
+            killChild(spawned.child);
+            _ = linux.close(spawned.master);
+            return error.OutOfMemory;
+        };
+
+        var id: [16]u8 = undefined;
+        self.io.random(&id);
+
+        s.* = .{
+            .manager = self,
+            .id = id,
+            .master = spawned.master,
+            .child = spawned.child,
+            .buf = buf,
+            .last_activity_ns = self.now(),
+        };
+
+        self.sessions.append(self.gpa, s) catch |err| {
+            self.gpa.free(buf);
+            self.gpa.destroy(s);
+            killChild(spawned.child);
+            _ = linux.close(spawned.master);
+            return err;
+        };
+
+        s.pump_thread = std.Thread.spawn(.{}, pump, .{s}) catch |err| {
+            _ = self.sessions.pop();
+            self.gpa.free(buf);
+            self.gpa.destroy(s);
+            killChild(spawned.child);
+            _ = linux.close(spawned.master);
+            return err;
+        };
+        return s;
+    }
+
+    fn destroyLocked(self: *Manager, s: *Session) void {
+        for (self.sessions.items, 0..) |item, i| {
+            if (item == s) {
+                _ = self.sessions.swapRemove(i);
+                break;
+            }
+        }
+
+        // 后台作业会被 job control 拆到新的进程组，单杀 -pid 收不干净；
+        // 先按 session id 扫一遍 /proc，再 HUP shell（pump 用 poll + stopping，
+        // 不依赖 slave 先关闭，避免 join 永久卡住）。
+        s.stopping.store(true, .release);
+        killSessionProcesses(self.io, s.child);
+        _ = linux.kill(-s.child, .HUP);
+        _ = linux.kill(s.child, .HUP);
+        if (s.pump_thread) |t| t.join();
+        pty.reap(s.child);
+        _ = linux.close(s.master);
+        self.gpa.free(s.buf);
+        self.gpa.destroy(s);
+    }
+};
+
+/// 结束 shell 所在的进程组；-pid 失败时再单独杀直接子进程。
+fn killChild(child: posix.pid_t) void {
+    _ = linux.kill(-child, .KILL);
+    _ = linux.kill(child, .KILL);
+}
+
+/// 杀掉同一 session（sid == shell pid）里的所有进程，包括 job control 拆出去的
+/// 后台作业。只读 /proc/<pid>/stat 的第 6 个字段，Linux 专用。
+fn killSessionProcesses(io: Io, sid: posix.pid_t) void {
+    var proc = std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true }) catch return;
+    defer proc.close(io);
+
+    var it = proc.iterate();
+    while (it.next(io) catch return) |entry| {
+        const pid = std.fmt.parseInt(posix.pid_t, entry.name, 10) catch continue;
+        if (pid <= 1 or pid == sid) continue;
+
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/proc/{s}/stat", .{entry.name}) catch continue;
+        var buf: [512]u8 = undefined;
+        const data = std.Io.Dir.cwd().readFile(io, path, &buf) catch continue;
+
+        // "pid (comm) state ppid pgrp session ..."；comm 里可能有空格/括号。
+        const rparen = std.mem.lastIndexOfScalar(u8, data, ')') orelse continue;
+        var fields = std.mem.tokenizeScalar(u8, data[rparen + 1 ..], ' ');
+        _ = fields.next() orelse continue; // state
+        _ = fields.next() orelse continue; // ppid
+        _ = fields.next() orelse continue; // pgrp
+        const session_text = fields.next() orelse continue;
+        const session = std.fmt.parseInt(posix.pid_t, session_text, 10) catch continue;
+        if (session == sid) _ = linux.kill(pid, .KILL);
     }
 }
 
 const Session = struct {
-    io: Io,
-    ws: *http.Server.WebSocket,
-    stream: *const net.Stream,
+    manager: *Manager,
+    id: [16]u8,
     master: posix.fd_t,
     child: posix.pid_t,
-    write_mutex: Io.Mutex = .init,
     pump_thread: ?std.Thread = null,
+    mutex: Io.Mutex = .init,
+    buf: []u8,
+    /// buf 中有效数据的起点（环形）。
+    start: usize = 0,
+    len: usize = 0,
+    /// 缓冲区里最旧字节的绝对偏移。
+    start_abs: u64 = 0,
+    /// 从创建到现在累计输出的字节数。
+    total: u64 = 0,
+    attachment: ?*Attachment = null,
+    /// destroy 时置位，让 pump 的 poll 循环尽快退出。
+    stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    closed: bool = false,
+    closed_ns: i96 = 0,
+    last_activity_ns: i96 = 0,
 
-    fn deinit(s: *Session) void {
-        // 先关闭 master：pump 线程的阻塞读会返回 EIO，从而自行退出。
-        _ = linux.close(s.master);
-        s.master = -1;
-        pty.reap(s.child);
-        if (s.pump_thread) |t| t.join();
+    fn now(self: *Session) i96 {
+        return Io.Clock.real.now(self.manager.io).nanoseconds;
     }
 
-    fn sendRaw(s: *Session, data: []const u8, op: http.Server.WebSocket.Opcode) !void {
-        try s.write_mutex.lock(s.io);
-        defer s.write_mutex.unlock(s.io);
-        try s.ws.writeMessage(data, op);
+    fn appendLocked(self: *Session, data: []const u8) void {
+        self.total += data.len;
+        if (data.len >= self.buf.len) {
+            // 单次输出比整个缓冲还大，只保留最后 buf.len 字节。
+            const tail = data[data.len - self.buf.len ..];
+            @memcpy(self.buf, tail);
+            self.start = 0;
+            self.len = self.buf.len;
+            self.start_abs = self.total - self.buf.len;
+            return;
+        }
+
+        const overflow = if (self.len + data.len > self.buf.len)
+            self.len + data.len - self.buf.len
+        else
+            0;
+        if (overflow > 0) {
+            self.start = (self.start + overflow) % self.buf.len;
+            self.len -= overflow;
+            self.start_abs += overflow;
+        }
+
+        const write_at = (self.start + self.len) % self.buf.len;
+        const first = @min(data.len, self.buf.len - write_at);
+        @memcpy(self.buf[write_at..][0..first], data[0..first]);
+        if (first < data.len) {
+            @memcpy(self.buf[0 .. data.len - first], data[first..]);
+        }
+        self.len += data.len;
     }
 
-    fn sendText(s: *Session, data: []const u8) !void {
-        return s.sendRaw(data, .text);
-    }
-
-    fn onControl(s: *Session, data: []const u8) !void {
-        var parsed = parseControl(std.heap.page_allocator, data) catch return;
-        defer parsed.deinit();
-        const c = parsed.value;
-        if (std.mem.eql(u8, c.t, "resize")) {
-            const cols = c.cols orelse return;
-            const rows = c.rows orelse return;
-            if (cols < 2 or rows < 1) return;
-            pty.resize(s.master, cols, rows);
+    /// 发送环形缓冲的一段；数据可能在物理上分成两段。
+    fn sendRing(self: *Session, att: *Attachment, index: usize, count: usize) !void {
+        if (count == 0) return;
+        const begin = (self.start + index) % self.buf.len;
+        const first = @min(count, self.buf.len - begin);
+        try att.sendRaw(self.buf[begin..][0..first], .binary);
+        if (first < count) {
+            try att.sendRaw(self.buf[0 .. count - first], .binary);
         }
     }
 };
 
 fn pump(s: *Session) void {
-    var buf: [8192]u8 = undefined;
-    while (true) {
-        const n = posix.read(s.master, &buf) catch break;
+    var read_buf: [8192]u8 = undefined;
+    var fds = [_]posix.pollfd{.{ .fd = s.master, .events = posix.POLL.IN, .revents = 0 }};
+    while (!s.stopping.load(.acquire)) {
+        fds[0].revents = 0;
+        const ready = posix.poll(&fds, 500) catch break;
+        if (ready == 0) continue;
+        if (fds[0].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) == 0) continue;
+        const n = posix.read(s.master, &read_buf) catch break;
         if (n == 0) break;
-        s.sendRaw(buf[0..n], .binary) catch break;
+
+        const io = s.manager.io;
+        s.mutex.lockUncancelable(io);
+        s.appendLocked(read_buf[0..n]);
+        // 只有还挂着前端时才用输出刷新活动时间：断线后后台程序继续输出
+        // 也不应该让会话永远不过期。
+        if (s.attachment != null) s.last_activity_ns = s.now();
+        if (s.attachment) |att| {
+            if (att.alive) {
+                att.sendRaw(read_buf[0..n], .binary) catch {
+                    att.alive = false;
+                    att.stream.shutdown(io, .both) catch {};
+                };
+            }
+        }
+        s.mutex.unlock(io);
     }
-    s.sendText("{\"t\":\"exit\"}") catch {};
-    // 发一个正常的 Close 帧，再 shutdown；只断 TCP 会让浏览器报 1006。
-    s.sendRaw("", .connection_close) catch {};
-    // 把连接线程从 WebSocket 阻塞读里叫醒，由它统一做清理。
-    s.stream.shutdown(s.io, .both) catch {};
+
+    const io = s.manager.io;
+    s.mutex.lockUncancelable(io);
+    s.closed = true;
+    s.closed_ns = s.now();
+    if (!s.stopping.load(.acquire)) {
+        if (s.attachment) |att| {
+            if (att.alive) {
+                att.sendText("{\"t\":\"exit\"}") catch {};
+                att.sendRaw("", .connection_close) catch {};
+                att.stream.shutdown(io, .both) catch {};
+            }
+        }
+    }
+    s.mutex.unlock(io);
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket 前端
+// ---------------------------------------------------------------------------
+
+const Control = struct {
+    t: []const u8 = "",
+    cols: ?u16 = null,
+    rows: ?u16 = null,
+};
+
+fn parseControl(alloc: Allocator, data: []const u8) !std.json.Parsed(Control) {
+    return std.json.parseFromSlice(Control, alloc, data, .{ .ignore_unknown_fields = true });
+}
+
+/// 接管一条已升级的 WebSocket：attach 到会话、转发输入与 resize，断开时 detach。
+pub fn serve(
+    io: Io,
+    manager: *Manager,
+    ws: *http.Server.WebSocket,
+    stream: *const net.Stream,
+    session_id: ?[16]u8,
+    offset: u64,
+) !void {
+    var att: Attachment = .{ .io = io, .ws = ws, .stream = stream };
+
+    manager.attach(&att, session_id, offset) catch |err| {
+        const body = switch (err) {
+            error.TooManySessions => "{\"t\":\"error\",\"reason\":\"too_many_sessions\"}",
+            error.PtySpawnFailed => "{\"t\":\"error\",\"reason\":\"pty_failed\"}",
+            else => "{\"t\":\"error\"}",
+        };
+        ws.writeMessage(body, .text) catch {};
+        return err;
+    };
+    defer manager.detach(&att);
+
+    while (true) {
+        const msg = ws.readSmallMessage() catch return;
+        switch (msg.opcode) {
+            .ping => att.sendRaw(msg.data, .pong) catch return,
+            .binary => {
+                const s = att.session orelse return;
+                pty.writeAll(s.master, msg.data) catch return;
+            },
+            .text => {
+                var parsed = parseControl(std.heap.page_allocator, msg.data) catch continue;
+                defer parsed.deinit();
+                const control = parsed.value;
+                if (std.mem.eql(u8, control.t, "close")) {
+                    manager.destroyAttached(&att);
+                    return;
+                }
+                if (std.mem.eql(u8, control.t, "resize")) {
+                    const s = att.session orelse return;
+                    const cols = control.cols orelse continue;
+                    const rows = control.rows orelse continue;
+                    if (cols < 2 or rows < 1) continue;
+                    pty.resize(s.master, cols, rows);
+                }
+            },
+            else => return,
+        }
+    }
+}
+
+/// 从 query 里解析 128-bit 会话 id（32 位十六进制）。
+pub fn parseSessionId(value: ?[]const u8) ?[16]u8 {
+    const v = value orelse return null;
+    if (v.len != 32) return null;
+    var out: [16]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, v) catch return null;
+    return out;
+}
+
+pub fn parseOffset(value: ?[]const u8) u64 {
+    const v = value orelse return 0;
+    return std.fmt.parseInt(u64, v, 10) catch 0;
+}
+
+test "ring buffer replay offsets" {
+    const io = std.testing.io;
+    var cfg = config.Config{};
+    var m = Manager.init(io, std.testing.allocator, &cfg);
+    // 不启动真实 PTY：手工构造一个 Session 测环形逻辑。
+    var buf: [16]u8 = undefined;
+    var s: Session = .{
+        .manager = &m,
+        .id = @splat(0),
+        .master = -1,
+        .child = -1,
+        .buf = &buf,
+    };
+    s.appendLocked("abcdefghij");
+    try std.testing.expectEqual(@as(usize, 10), s.len);
+    try std.testing.expectEqual(@as(u64, 0), s.start_abs);
+    s.appendLocked("klmnopqrst");
+    // 16 字节容量，保留最后 16 字节。
+    try std.testing.expectEqual(@as(usize, 16), s.len);
+    try std.testing.expectEqual(@as(u64, 4), s.start_abs);
+    try std.testing.expectEqual(@as(u64, 20), s.total);
 }
 
 test "control message parsing" {
@@ -189,4 +636,14 @@ test "unknown control fields are ignored" {
     );
     defer parsed.deinit();
     try std.testing.expectEqualStrings("ping", parsed.value.t);
+}
+
+test "session id parsing rejects junk" {
+    try std.testing.expect(parseSessionId("0123456789abcdef0123456789abcdef") != null);
+    try std.testing.expect(parseSessionId(null) == null);
+    try std.testing.expect(parseSessionId("0123456789abcdef") == null);
+    try std.testing.expect(parseSessionId("0123456789abcdef0123456789abcdeg") == null);
+    try std.testing.expectEqual(@as(u64, 123), parseOffset("123"));
+    try std.testing.expectEqual(@as(u64, 0), parseOffset("nope"));
+    try std.testing.expectEqual(@as(u64, 0), parseOffset(null));
 }

@@ -38,6 +38,7 @@ export PASSWORD ROOT
 node tests/browser/ui.cjs
 node tests/browser/features.cjs
 node tests/browser/clipboard.cjs
+node tests/browser/session.cjs
 node tests/browser/files.cjs
 
 echo "browser tests: ALL PASS"

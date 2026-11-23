@@ -10,6 +10,7 @@
 | 登录认证（弹窗登录 / 7 天会话 / 空闲超时 / 注销） | ✅ |
 | 登录限流、连接上限、Origin 校验、优雅退出 | ✅ |
 | WebSocket ⇄ Linux PTY，真实 shell | ✅ |
+| 内置会话保持（刷新/断线回到同一 shell，增量回放） | ✅ |
 | 分屏 1–4、可拖拽分栏、最大化、字号调节 | ✅ |
 | 终端搜索 / 链接 / 移动端按键条 | ✅ |
 | 文件管理、文本编辑、上传（分片续传）/ 下载 / 目录 tar | ✅ |
@@ -47,13 +48,15 @@ zig test src/tests.zig
   "session_idle_hours": 24,
   "max_connections": 64,
   "root": "/srv/work",
-  "max_sessions": 16
+  "max_sessions": 16,
+  "pty_idle_minutes": 30
 }
 ```
 
 环境变量：`MYTTY_CONFIG`、`MYTTY_HOST`、`MYTTY_PORT`、`MYTTY_SHELL`、
 `MYTTY_PASSWORD`、`MYTTY_SESSION_TTL_DAYS`、`MYTTY_SESSION_IDLE_HOURS`、
-`MYTTY_MAX_CONNECTIONS`、`MYTTY_ROOT`、`MYTTY_MAX_SESSIONS`。
+`MYTTY_MAX_CONNECTIONS`、`MYTTY_ROOT`、`MYTTY_MAX_SESSIONS`、
+`MYTTY_PTY_IDLE_MINUTES`。
 完整参数见 `my-tty --help`；仓库里有一份 `my-tty.example.json`。
 `my-tty --check-config` 只校验配置与 root，不启动服务。
 
@@ -66,6 +69,7 @@ zig test src/tests.zig
   由 `--session-idle-hours` 调整（0 关闭）。
 - 顶栏“注销”会同时清除服务端会话与 Cookie；所有终端随之关闭。
 - 会话只存在内存中，进程重启后需要重新登录；一次性 WS 票据 30 秒失效。
+  终端会话同样是内存态，进程重启后 shell 不会保留。
 - 同一 IP 连续失败 5 次登录会封禁 5 分钟（429 + `Retry-After`）；
   并发连接数默认上限 64。
 
@@ -99,6 +103,19 @@ HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
   前端不再单独判断 `metaKey`。
 - 顶栏的 `^C` 按钮直接向当前 pane 发送 `0x03`，用于 RDP/远程桌面吞掉 Ctrl、或不想用
   键盘的场景；移动端按键条里也有同样的 `^C`。
+
+## 会话保持
+
+不需要 tmux/screen：服务端自己维护每个 pane 的 PTY 和 512 KiB 环形输出缓冲。
+
+- 刷新页面、网络断开后重新连接，会 attach 回**同一个 shell**，环境变量、
+  工作目录、正在运行的程序都还在；服务端只回放客户端没收到的那部分字节。
+- 回放不会 `reset()` 终端，也不会重建 Terminal，因此滚动位置和文本选择都保留；
+  页内重连后可以直接继续复制/粘贴。
+- 断开后保留 `--pty-idle-minutes`（默认 30 分钟，0 = 断开即回收）；关掉分屏按钮
+  或注销会立即结束对应 shell。
+- 会话只在内存里，服务端进程重启后全部失效（重新连接会得到新 shell）。
+- 最多同时保留 `max_sessions` 个会话；超出时优先淘汰已退出、最久没活动的空闲会话。
 
 ## 安全边界
 

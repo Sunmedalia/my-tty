@@ -31,8 +31,9 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("配置检查失败: 无法打开 root={s}（{t}）\n", .{ cfg.root, err });
             std.process.exit(1);
         };
-        std.debug.print("配置检查通过: host={s} port={d} root={s} sessions={d}d/{d}h conns={d}\n", .{
-            cfg.host, cfg.port, fs.root, cfg.session_ttl_days, cfg.session_idle_hours, cfg.max_connections,
+        std.debug.print("配置检查通过: host={s} port={d} root={s} sessions={d}d/{d}h conns={d} pty_idle={d}m\n", .{
+            cfg.host,             cfg.port, fs.root, cfg.session_ttl_days, cfg.session_idle_hours, cfg.max_connections,
+            cfg.pty_idle_minutes,
         });
         init.gpa.free(fs.root);
         return;
@@ -69,6 +70,7 @@ fn describe(err: config.Config.ParseError) []const u8 {
         error.EmptyPassword => "密码不能为空",
         error.InvalidSessionTtl => "登录有效期必须在 1–365 天，空闲超时不得超过 8760 小时",
         error.InvalidMaxConnections => "最大连接数必须在 1–4096 之间",
+        error.InvalidPtyIdle => "pty 保留时间不得超过 7 天（10080 分钟）",
         error.ConfigReadFailed => "配置文件读取失败",
         error.ConfigInvalid => "配置文件不是合法 JSON 或字段类型不对",
         else => "未知错误",

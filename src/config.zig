@@ -26,6 +26,8 @@ pub const Config = struct {
     max_connections: u32 = 64,
     /// 同时存在的终端会话上限，防止一次误操作 fork 出几百个 shell。
     max_sessions: u32 = 16,
+    /// 前端断开后 shell 的保留时间（分钟）；0 表示断开即回收。
+    pty_idle_minutes: u32 = 30,
     /// 文件管理/编辑的可访问根目录；所有路径都被限制在它下面。
     root: []const u8 = ".",
     /// 子进程继承的环境变量。
@@ -39,6 +41,7 @@ pub const Config = struct {
         EmptyPassword,
         InvalidSessionTtl,
         InvalidMaxConnections,
+        InvalidPtyIdle,
         ConfigReadFailed,
         ConfigInvalid,
         OutOfMemory,
@@ -59,6 +62,7 @@ pub const Config = struct {
         \\  --check-config       只校验配置与 root，然后退出
         \\  --root <dir>         文件管理根目录（默认当前目录）
         \\  --max-sessions <n>   并发会话上限（默认 16）
+        \\  --pty-idle-minutes <n>  断开后保留 shell 的分钟数（默认 30，0 关闭）
         \\  -h, --help           显示本帮助
         \\
         \\配置文件示例（my-tty.json，字段全部可选）:
@@ -71,12 +75,14 @@ pub const Config = struct {
         \\    "session_idle_hours": 24,
         \\    "max_connections": 64,
         \\    "root": "/srv/work",
-        \\    "max_sessions": 16
+        \\    "max_sessions": 16,
+        \\    "pty_idle_minutes": 30
         \\  }
         \\
         \\环境变量: MYTTY_CONFIG / MYTTY_HOST / MYTTY_PORT / MYTTY_SHELL /
         \\          MYTTY_PASSWORD / MYTTY_SESSION_TTL_DAYS / MYTTY_SESSION_IDLE_HOURS /
-        \\          MYTTY_MAX_CONNECTIONS / MYTTY_ROOT / MYTTY_MAX_SESSIONS
+        \\          MYTTY_MAX_CONNECTIONS / MYTTY_ROOT / MYTTY_MAX_SESSIONS /
+        \\          MYTTY_PTY_IDLE_MINUTES
         \\
         \\TLS 不在本程序范围内：请只监听回环地址，把明文 HTTP/WS 交给外部反向代理。
         \\
@@ -93,6 +99,7 @@ pub const Config = struct {
         max_connections: ?u32 = null,
         root: ?[]const u8 = null,
         max_sessions: ?u32 = null,
+        pty_idle_minutes: ?u32 = null,
     };
 
     pub fn parse(alloc: std.mem.Allocator, init: std.process.Init) ParseError!Config {
@@ -118,6 +125,7 @@ pub const Config = struct {
         if (env.get("MYTTY_MAX_CONNECTIONS")) |v| cfg.max_connections = try parseCount(v);
         if (env.get("MYTTY_PORT")) |v| cfg.port = try parsePort(v);
         if (env.get("MYTTY_MAX_SESSIONS")) |v| cfg.max_sessions = try parseCount(v);
+        if (env.get("MYTTY_PTY_IDLE_MINUTES")) |v| cfg.pty_idle_minutes = try parseCount(v);
         if (env.get("MYTTY_SHELL")) |v| {
             cfg.shell = v;
             shell_set = true;
@@ -152,6 +160,8 @@ pub const Config = struct {
                 cfg.root = v;
             } else if (optionValue(args, &i, "--max-sessions")) |v| {
                 cfg.max_sessions = try parseCount(v);
+            } else if (optionValue(args, &i, "--pty-idle-minutes")) |v| {
+                cfg.pty_idle_minutes = try parseCount(v);
             } else {
                 return error.UnknownArgument;
             }
@@ -177,6 +187,7 @@ pub const Config = struct {
         if (cfg.session_ttl_days == 0 or cfg.session_ttl_days > 365) return error.InvalidSessionTtl;
         if (cfg.session_idle_hours > 8760) return error.InvalidSessionTtl;
         if (cfg.max_connections == 0 or cfg.max_connections > 4096) return error.InvalidMaxConnections;
+        if (cfg.pty_idle_minutes > 10080) return error.InvalidPtyIdle;
     }
 };
 
@@ -206,6 +217,7 @@ fn loadConfigFile(
     if (file.max_connections) |v| cfg.max_connections = v;
     if (file.root) |v| cfg.root = try alloc.dupe(u8, v);
     if (file.max_sessions) |v| cfg.max_sessions = v;
+    if (file.pty_idle_minutes) |v| cfg.pty_idle_minutes = v;
     return file.shell != null;
 }
 
@@ -280,6 +292,9 @@ test "validate connection and idle bounds" {
     cfg.max_connections = 64;
     cfg.session_idle_hours = 8761;
     try std.testing.expectError(error.InvalidSessionTtl, cfg.validate());
+    cfg.session_idle_hours = 24;
+    cfg.pty_idle_minutes = 10081;
+    try std.testing.expectError(error.InvalidPtyIdle, cfg.validate());
 }
 
 test "validate session ttl bounds" {

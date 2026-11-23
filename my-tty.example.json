@@ -7,5 +7,6 @@
   "session_idle_hours": 24,
   "max_connections": 64,
   "root": "/srv/work",
-  "max_sessions": 16
+  "max_sessions": 16,
+  "pty_idle_minutes": 30
 }

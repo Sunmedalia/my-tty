@@ -59,7 +59,7 @@
 
   // ---------------------------------------------------------------- terminals
 
-  function createPane() {
+  function createPane(initialSession = "") {
     if (panes.length >= MAX_PANES) return;
 
     const el = document.createElement("section");
@@ -106,6 +106,8 @@
       bar,
       status,
       dot,
+      sessionId: initialSession,
+      offset: 0,
       ws: null,
       alive: false,
       reconnect: null,
@@ -145,6 +147,12 @@
     const idx = panes.indexOf(pane);
     if (idx === -1) return;
     if (pane.ws) {
+      // 显式关闭分屏 = 结束这个会话；页面刷新/断网不会发这条消息。
+      try {
+        if (pane.ws.readyState === WebSocket.OPEN) {
+          pane.ws.send(JSON.stringify({ t: "close" }));
+        }
+      } catch (_) {}
       try {
         pane.ws.close();
       } catch (_) {}
@@ -157,11 +165,22 @@
       activePane = panes[Math.min(idx, panes.length - 1)] || null;
       if (activePane) focusPane(activePane);
     }
+    pane.sessionId = "";
+    saveSessions();
     if (panes.length === 0) {
       if (respawn && started) createPane();
     } else {
       layout();
     }
+  }
+
+  function saveSessions() {
+    try {
+      sessionStorage.setItem(
+        "myttty.sessions",
+        JSON.stringify(panes.map((p) => p.sessionId || ""))
+      );
+    } catch (_) {}
   }
 
   async function connectPane(pane) {
@@ -183,9 +202,12 @@
       return;
     }
 
+    let url = `${wsBase}?ticket=${encodeURIComponent(ticket)}&offset=${pane.offset}`;
+    if (pane.sessionId) url += `&session=${encodeURIComponent(pane.sessionId)}`;
+
     let ws;
     try {
-      ws = new WebSocket(`${wsBase}?ticket=${encodeURIComponent(ticket)}`);
+      ws = new WebSocket(url);
     } catch (err) {
       setPaneStatus(pane, "连接失败", "error");
       return;
@@ -198,11 +220,15 @@
       pane.alive = true;
       setPaneStatus(pane, "已连接", "ok");
       fitPane(pane);
+      // 点击状态栏重连后把焦点还给终端，否则接下来的按键会落到 body 上。
+      focusPane(pane);
       updateSummary();
     };
     ws.onmessage = (event) => {
       if (typeof event.data !== "string") {
-        pane.term.write(new Uint8Array(event.data));
+        const bytes = new Uint8Array(event.data);
+        pane.offset += bytes.byteLength;
+        pane.term.write(bytes);
         return;
       }
       let msg;
@@ -211,10 +237,28 @@
       } catch (_) {
         return;
       }
-      if (msg.t === "exit") {
+      if (msg.t === "ready") {
+        // 服务端会在回放前给出权威起点；换会话（如服务端重启）时重置偏移。
+        if (typeof msg.offset === "number") pane.offset = msg.offset;
+        if (msg.session && msg.session !== pane.sessionId) {
+          const replaced = !!pane.sessionId;
+          pane.sessionId = msg.session;
+          saveSessions();
+          if (replaced) setPaneStatus(pane, "已连接 · 原会话已失效", "pending");
+        }
+        sendResize(pane);
+      } else if (msg.t === "gap") {
+        notice(`缓冲区已满，丢弃了 ${msg.lost} 字节历史输出`, true);
+      } else if (msg.t === "exit") {
+        pane.sessionId = "";
+        pane.offset = 0;
+        saveSessions();
         setPaneStatus(pane, "Shell 已退出（点击重连）", "error");
       } else if (msg.t === "error") {
-        setPaneStatus(pane, "会话异常（点击重连）", "error");
+        setPaneStatus(
+          msg.reason === "too_many_sessions" ? "会话数已满（点击重试）" : "会话异常（点击重连）",
+          "error"
+        );
       }
     };
     ws.onclose = () => {
@@ -877,7 +921,7 @@
 
   // -------------------------------------------------------------------- boot
 
-  addPaneBtn.addEventListener("click", createPane);
+  addPaneBtn.addEventListener("click", () => createPane());
 
   findInput.addEventListener("input", () => runFind(false, true));
   findInput.addEventListener("keydown", (ev) => {
@@ -1204,8 +1248,23 @@
       await document.fonts.load('14px "JetBrains Mono"');
       await document.fonts.ready;
     } catch (_) {}
-    if (panes.length === 0) createPane();
-    else layout();
+    if (panes.length === 0) {
+      let restored = 0;
+      try {
+        const saved = JSON.parse(sessionStorage.getItem("myttty.sessions") || "[]");
+        if (Array.isArray(saved)) {
+          for (const sid of saved.slice(0, MAX_PANES)) {
+            if (typeof sid === "string" && /^[0-9a-f]{32}$/.test(sid)) {
+              createPane(sid);
+              restored += 1;
+            }
+          }
+        }
+      } catch (_) {}
+      if (restored === 0) createPane();
+    } else {
+      layout();
+    }
     refreshFiles();
   }
 
@@ -1213,6 +1272,9 @@
     started = false;
     for (const pane of [...panes]) removePane(pane, false);
     panes.length = 0;
+    try {
+      sessionStorage.removeItem("myttty.sessions");
+    } catch (_) {}
   }
 
   async function refreshAuth() {
