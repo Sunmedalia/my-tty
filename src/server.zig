@@ -43,6 +43,8 @@ const max_tracked_connections = 4096;
 const ConnSlot = struct {
     fd: posix.fd_t = -1,
     last_ns: i96 = 0,
+    /// 0 = 无截止时间；非 0 时到点就 shutdown，用于未登录登录请求的慢 body。
+    deadline_ns: i96 = 0,
     waiting_head: bool = false,
 };
 var conn_mutex: Io.Mutex = .init;
@@ -100,6 +102,27 @@ fn disarmIdle(io: Io, fd: posix.fd_t) void {
     }
 }
 
+/// 给一个连接设置整体截止时间（秒）；用于登录这种小 body 的请求。
+fn connSetDeadline(io: Io, fd: posix.fd_t, seconds: i96) void {
+    conn_mutex.lockUncancelable(io);
+    defer conn_mutex.unlock(io);
+    const ts = monotonicNs(io);
+    for (&conn_slots) |*s| {
+        if (s.fd == fd) {
+            s.deadline_ns = ts + seconds * std.time.ns_per_s;
+            return;
+        }
+    }
+}
+
+fn connClearDeadline(io: Io, fd: posix.fd_t) void {
+    conn_mutex.lockUncancelable(io);
+    defer conn_mutex.unlock(io);
+    for (&conn_slots) |*s| {
+        if (s.fd == fd) s.deadline_ns = 0;
+    }
+}
+
 fn connRemove(io: Io, fd: posix.fd_t) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
@@ -116,8 +139,11 @@ fn sweepIdleConnections(io: Io) void {
     defer conn_mutex.unlock(io);
     const ts = monotonicNs(io);
     for (&conn_slots) |*s| {
-        if (s.fd >= 0 and s.waiting_head and ts - s.last_ns > http_idle_seconds * std.time.ns_per_s) {
+        if (s.fd < 0) continue;
+        if (s.waiting_head and ts - s.last_ns > http_idle_seconds * std.time.ns_per_s) {
             _ = linux.shutdown(s.fd, 2); // 唤醒阻塞在 receiveHead 的线程
+        } else if (s.deadline_ns != 0 and ts > s.deadline_ns) {
+            _ = linux.shutdown(s.fd, 2); // 请求整体超时（慢 body）
         }
     }
 }
@@ -305,7 +331,7 @@ fn connectionMain(
                 return;
             },
             .none => {
-                handleHttp(io, gpa, cfg, fs, auth_state, limiter, peer, &request) catch return;
+                handleHttp(io, gpa, cfg, fs, auth_state, limiter, peer, stream.socket.handle, &request) catch return;
             },
         }
     }
@@ -319,12 +345,17 @@ fn handleHttp(
     auth_state: *auth.Auth,
     limiter: *LoginLimiter,
     peer: net.IpAddress,
+    fd: posix.fd_t,
     request: *http.Server.Request,
 ) !void {
     const path = util.pathOnly(request.head.target);
 
     // 唯一的例外：登录端点本身。没有它就无法获得会话。
     if (std.mem.eql(u8, path, "/api/auth/login")) {
+        // 这是唯一会读取未登录请求 body 的地方，而且 body 只有 4 KiB；
+        // 给整个请求 10 秒上限，挡住慢 body 占住连接线程。
+        connSetDeadline(io, fd, 10);
+        defer connClearDeadline(io, fd);
         return handleLogin(io, gpa, cfg, auth_state, limiter, peer, request);
     }
 

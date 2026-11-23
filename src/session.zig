@@ -168,6 +168,8 @@ pub const Manager = struct {
         const session = att.session orelse return;
         att.session = null;
         att.alive = false;
+        // 先叫醒可能正卡在写终端输出的 pump，再拿 session 锁，避免关闭分屏被慢客户端拖住。
+        att.stream.shutdown(self.io, .both) catch {};
 
         session.mutex.lockUncancelable(self.io);
         const was_current = session.attachment == att;
@@ -178,9 +180,6 @@ pub const Manager = struct {
 
         // 已经被别的连接接管时，不能替对方把会话杀掉。
         if (!was_current) return;
-
-        // 叫醒可能正卡在“写终端输出”的 pump 线程，否则 destroy 里的 join 会一直等。
-        att.stream.shutdown(self.io, .both) catch {};
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
