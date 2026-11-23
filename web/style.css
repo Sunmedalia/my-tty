@@ -114,6 +114,9 @@ button:focus-visible {
 
 #files {
   flex: 0 0 300px;
+  min-width: 0;
+  max-width: 300px;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -173,7 +176,8 @@ button.icon {
   list-style: none;
   margin: 0;
   padding: 4px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -182,6 +186,7 @@ button.icon {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
   padding: 2px 4px;
   border-radius: 4px;
 }
@@ -191,7 +196,7 @@ button.icon {
 }
 
 #file-list .entry .name {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -208,11 +213,15 @@ button.icon {
 }
 
 #file-list .entry .size {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
   color: #5f6880;
   font-size: 11px;
 }
 
 #file-list .entry .actions {
+  flex: 0 0 auto;
   display: none;
   gap: 2px;
 }
@@ -455,6 +464,7 @@ button.icon {
   }
 
   #files {
+    max-width: none;
     position: absolute;
     top: 38px;
     bottom: 0;
