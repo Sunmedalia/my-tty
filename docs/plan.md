@@ -58,7 +58,6 @@ browser
  │
  │  HTTP GET  /、/app.js、/vendor/*      → 内嵌静态资源
  │  HTTP     /api/fs/*                   → 文件管理/编辑（JSON）
- │  HTTP     /healthz
  │  WS       /ws?ticket=…                → 一个 PTY 会话（票据 30s）
  ▼
 Zig 单进程

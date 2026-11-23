@@ -27,14 +27,12 @@ zig build
 PID=$!
 
 for _ in $(seq 1 50); do
-  if curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then
     break
   fi
   sleep 0.1
 done
 
-echo "== healthz =="
-curl -fsS "http://127.0.0.1:$PORT/healthz"
 echo "== index =="
 curl -fsS "http://127.0.0.1:$PORT/" | grep -q 'id="workspace"' && echo "index: PASS"
 echo "== embedded vendor =="

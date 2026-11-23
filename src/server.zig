@@ -1,7 +1,7 @@
 //! HTTP 路由 + 连接生命周期。
 //!
 //! 只用 std.http.Server；一条连接一个线程，静态资源全部来自内存。
-//! 除登录页外壳和 `/healthz` 外，所有功能（文件 API、WebSocket/PTY）都要求
+//! 除登录页外壳外，所有功能（文件 API、WebSocket/PTY）都要求
 //! 已登录的会话 Cookie。这里没有任何 TLS 代码。
 
 const std = @import("std");
@@ -137,9 +137,6 @@ fn handleHttp(
         return respond(request, "method not allowed\n", .method_not_allowed);
     }
 
-    if (std.mem.eql(u8, path, "/healthz")) {
-        return respond(request, "ok\n", .ok);
-    }
     if (std.mem.eql(u8, path, "/favicon.ico")) {
         return respond(request, "", .no_content);
     }
