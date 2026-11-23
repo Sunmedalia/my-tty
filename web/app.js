@@ -302,9 +302,13 @@
   }
 
   function updateSummary() {
+    const total = panes.length;
     const alive = panes.filter((p) => p.alive).length;
-    statusEl.textContent = panes.length === 0 ? "无会话" : `${alive}/${panes.length} 已连接`;
-    statusEl.className = alive === panes.length && panes.length > 0 ? "ok" : panes.length ? "pending" : "";
+    // 全部正常时只显示“已连接”；只有分屏掉线时才显示 alive/total，
+    // 避免出现 1/1、2/2 这种没有信息量的分数。
+    statusEl.textContent =
+      total === 0 ? "无会话" : alive === total ? "已连接" : `${alive}/${total} 已连接`;
+    statusEl.className = alive === total && total > 0 ? "ok" : total ? "pending" : "";
   }
 
   function sendInput(pane, data) {
