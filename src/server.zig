@@ -26,12 +26,67 @@ const security_headers = [_]http.Header{
     .{ .name = "content-security-policy", .value = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" },
 };
 
-/// 读/写 socket 超时；只用于 HTTP 阶段，WebSocket 升级后读超时会清零。
-const io_timeout_seconds: isize = 30;
+/// HTTP 阶段等待请求头的空闲上限（秒）。
+///
+/// 不能用 SO_RCVTIMEO 做超时：std.Io.Threaded 的 netRead 把 EAGAIN 当成
+/// “programmer bug” 直接 panic。这里维护一张“正在等请求头”的连接表，
+/// 由维护线程主动 shutdown 超时连接；请求开始处理后立刻移出表，
+/// 避免误杀慢速的大文件传输。
+const http_idle_seconds: i96 = 30;
 
 var shutting_down = std.atomic.Value(bool).init(false);
 var listen_handle = std.atomic.Value(posix.fd_t).init(-1);
 var active_connections = std.atomic.Value(u32).init(0);
+
+const ConnSlot = struct {
+    fd: posix.fd_t = -1,
+    last_ns: i96 = 0,
+};
+var conn_mutex: Io.Mutex = .init;
+var conn_slots: [128]ConnSlot = @splat(.{});
+
+fn monotonicNs(io: Io) i96 {
+    return Io.Clock.awake.now(io).nanoseconds;
+}
+
+/// 标记连接正在等请求头；已在表里就刷新时间。
+fn armIdle(io: Io, fd: posix.fd_t) void {
+    conn_mutex.lockUncancelable(io);
+    defer conn_mutex.unlock(io);
+    const ts = monotonicNs(io);
+    for (&conn_slots) |*s| {
+        if (s.fd == fd) {
+            s.last_ns = ts;
+            return;
+        }
+    }
+    for (&conn_slots) |*s| {
+        if (s.fd < 0) {
+            s.* = .{ .fd = fd, .last_ns = ts };
+            return;
+        }
+    }
+}
+
+/// 请求头已经收到：处理请求期间不再参与空闲清理。
+fn disarmIdle(io: Io, fd: posix.fd_t) void {
+    conn_mutex.lockUncancelable(io);
+    defer conn_mutex.unlock(io);
+    for (&conn_slots) |*s| {
+        if (s.fd == fd) s.fd = -1;
+    }
+}
+
+fn sweepIdleConnections(io: Io) void {
+    conn_mutex.lockUncancelable(io);
+    defer conn_mutex.unlock(io);
+    const ts = monotonicNs(io);
+    for (&conn_slots) |*s| {
+        if (s.fd >= 0 and ts - s.last_ns > http_idle_seconds * std.time.ns_per_s) {
+            _ = linux.shutdown(s.fd, 2); // 唤醒阻塞在 receiveHead 的线程
+        }
+    }
+}
 
 fn onSignal(_: posix.SIG) callconv(.c) void {
     shutting_down.store(true, .release);
@@ -101,9 +156,6 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
             continue;
         }
 
-        setSocketTimeout(stream.socket.handle, posix.SO.RCVTIMEO, io_timeout_seconds);
-        setSocketTimeout(stream.socket.handle, posix.SO.SNDTIMEO, io_timeout_seconds);
-
         const thread = std.Thread.spawn(.{}, connectionMain, .{
             io, gpa, stream, cfg, &fs, &auth_state, &limiter, &manager,
         }) catch {
@@ -128,6 +180,7 @@ fn maintenance(io: Io, auth_state: *auth.Auth, manager: *session.Manager) void {
         Io.sleep(io, Io.Duration.fromSeconds(1), .real) catch return;
         if (shutting_down.load(.acquire)) break;
         ticks += 1;
+        sweepIdleConnections(io);
         if (ticks % 60 != 0) continue;
         auth_state.sweep();
         manager.sweep();
@@ -145,6 +198,7 @@ fn connectionMain(
     manager: *session.Manager,
 ) void {
     defer {
+        disarmIdle(io, stream.socket.handle);
         _ = active_connections.fetchSub(1, .acq_rel);
         stream.close(io);
     }
@@ -157,9 +211,9 @@ fn connectionMain(
     var server: http.Server = .init(&reader.interface, &writer.interface);
 
     while (true) {
-        // 每个 HTTP 请求都给一次慢请求超时；WebSocket 升级后单独清零。
-        setSocketTimeout(stream.socket.handle, posix.SO.RCVTIMEO, io_timeout_seconds);
+        armIdle(io, stream.socket.handle);
         var request = server.receiveHead() catch return;
+        disarmIdle(io, stream.socket.handle);
 
         switch (request.upgradeRequested()) {
             .websocket => |maybe_key| {
@@ -175,8 +229,7 @@ fn connectionMain(
                     respond(&request, "unauthorized\n", .unauthorized) catch {};
                     return;
                 }
-                // 终端可能空闲很久，升级后取消读超时。
-                setSocketTimeout(stream.socket.handle, posix.SO.RCVTIMEO, 0);
+                // 终端可能空闲很久；上面已经 disarm，不再参与 HTTP 空闲清理。
                 const sid = session.parseSessionId(util.queryParam(request.head.target, "session"));
                 const resume_offset = session.parseOffset(util.queryParam(request.head.target, "offset"));
                 var ws = request.respondWebSocket(.{ .key = key }) catch return;
@@ -518,10 +571,4 @@ fn buildHeaders(dst: []http.Header, extra: []const http.Header) []const http.Hea
     @memcpy(dst[0..extra.len], extra);
     @memcpy(dst[extra.len..][0..security_headers.len], &security_headers);
     return dst[0 .. extra.len + security_headers.len];
-}
-
-fn setSocketTimeout(fd: posix.fd_t, opt: u32, seconds: isize) void {
-    if (seconds < 0) return;
-    const tv: posix.timeval = .{ .sec = seconds, .usec = 0 };
-    posix.setsockopt(fd, posix.SOL.SOCKET, opt, std.mem.asBytes(&tv)) catch {};
 }

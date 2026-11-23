@@ -121,7 +121,8 @@ HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 
 - 默认只监听 `127.0.0.1`；除登录端点本身外，**所有 `/api/*` 与 WebSocket 都必须携带有效会话**，否则一律 401。
 - 密码比较使用定长时间实现；登录失败固定延迟 250ms，并有按 IP 的失败封禁。
-- HTTP 阶段有 30 秒读写超时（防 slowloris）；WebSocket 升级后取消读超时。
+- HTTP 阶段等待请求头超过 30 秒会被服务端主动断开（防 slowloris）；
+  大文件上传/下载与 WebSocket 不受这个计时影响。
 - 带 `Origin` 的 WebSocket 请求必须与 `Host` 一致；一次性票据防止跨站复用。
 - `SIGTERM`/`SIGINT` 会停止 accept、回收所有 PTY 后退出。
 - 文件管理/编辑只允许访问 `root` 下的真实路径，符号链接无法逃逸。

@@ -174,7 +174,9 @@ WebSocket 升级既接受会话 Cookie，也接受 `?ticket=`（一次性）。
 - 会话 Cookie：`HttpOnly; SameSite=Strict; Path=/`，反向代理为 HTTPS 时加 `Secure`。
 - 会话有空闲超时；后台每 60 秒清理一次过期登录会话/票据和空闲 PTY 会话。
 - WebSocket 票据 30 秒、一次性；带 Origin 时必须与 Host 一致；注销立即失效。
-- HTTP 阶段 30 秒读写超时；并发连接上限；SIGTERM/SIGINT 优雅退出并回收 PTY。
+- HTTP 阶段等待请求头超过 30 秒会被维护线程主动断开（不依赖 SO_RCVTIMEO，
+  避免 std.Io.Threaded 把 EAGAIN 当内部错误 panic）；处理请求/传输文件期间不设超时。
+  并发连接上限；SIGTERM/SIGINT 优雅退出并回收 PTY。
 - 文件 API 以启动时 `realpath(root)` 为唯一边界；每个目标是 `realPathFileAlloc`
   后再做前缀校验，符号链接无法逃逸。新建文件先校验父目录。
 - 文本读取/写入上限 1 MiB；上传上限 64 MiB，流式写临时文件后原子替换。
