@@ -137,6 +137,11 @@ TLS 不属于本项目：请让进程只监听回环地址，把明文 HTTP/WS �
 的构建产物（MIT，许可证同目录）。xterm 6 默认就是 DOM renderer，因此文本可以
 用浏览器原生方式选择与复制；没有引入 WebGL/Canvas addon。
 
+前端对 xterm 6.0 做了一处输入修补：Safari 和部分输入法（如中文输入法的英文模式）
+会让字符的 `input` 事件早于它自己的 `keydown`，xterm 用 `_keyDownSeen` 去重时会把
+字符当成重复事件丢掉。我们在 `beforeinput` 阶段清掉这个标记，让 xterm 正常发送；
+正常按键已经被 xterm `preventDefault`，不会产生 `input` 事件，因此不会重复。
+
 `web/vendor/fonts/` 内置 JetBrains Mono v2.304（OFL 1.1）。DOM 渲染器只能靠
 字体绘制方框/方块字符，系统字体（如 DejaVu）会让 `█` 和边框出现缝隙；
 内置字体在创建终端前完成加载，TUI 的边框与色块才能连续。

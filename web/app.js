@@ -97,6 +97,20 @@
     term.loadAddon(new WebLinksAddon.WebLinksAddon());
     term.open(termEl);
 
+    // xterm 6.0 的去重条件：composed 的 insertText 只要内部的 _keyDownSeen 为真
+    // 就会被当成重复事件丢掉。Safari，以及部分输入法（例如中文输入法的英文模式）
+    // 会出现字符的 input 早于自己的 keydown，或 keydown 直接是 229，结果字符被吞。
+    // 在 beforeinput 阶段清掉标记，让 xterm 自己的 input 路径把它发出去；正常按键
+    // 已经被 xterm preventDefault，不会产生 input 事件，所以不会重复发送。
+    const helperTextarea = term.textarea;
+    if (helperTextarea && term._core) {
+      helperTextarea.addEventListener("beforeinput", (event) => {
+        if (!event.composed || !event.data) return;
+        if (event.inputType !== "insertText" || event.isComposing) return;
+        term._core._keyDownSeen = false;
+      });
+    }
+
     const pane = {
       el,
       termEl,

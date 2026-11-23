@@ -40,6 +40,30 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.waitForTimeout(500);
   assert((await page.locator(".xterm-rows").innerText()).includes("INTERRUPT_BTN_OK"), "^C button interrupts shell");
 
+  // Safari / 输入法丢字回归：keydown 之后到达的 composed insertText 不能被
+  // xterm 的 _keyDownSeen 去重逻辑吞掉。
+  await page.locator(".pane-term").click();
+  await page.keyboard.type("read -r X; echo ILEN=${#X}; echo IVAL=$X\r");
+  await page.waitForTimeout(300);
+  await page.evaluate(() => {
+    const ta = document.querySelector(".xterm-helper-textarea");
+    ta.focus();
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Process", bubbles: true, cancelable: true }));
+    const opts = { data: "Z", inputType: "insertText", composed: true, bubbles: true, cancelable: true };
+    ta.dispatchEvent(new InputEvent("beforeinput", opts));
+    ta.dispatchEvent(new InputEvent("input", opts));
+  });
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(
+    () => document.querySelector(".xterm-rows").innerText.includes("IVAL=Z"),
+    null,
+    { timeout: 5000 }
+  );
+  assert(
+    (await page.locator(".xterm-rows").innerText()).includes("ILEN=1"),
+    "composed insertText is not dropped"
+  );
+
   await page.locator(".pane-term").click();
   await page.keyboard.type("printf 'ALPHA\\nBETA\\nALPHA\\n'\r");
   await page.waitForTimeout(500);
