@@ -8,15 +8,15 @@
 
 :root {
   color-scheme: dark;
-  --bg: #0f1115;
-  --bar: #161922;
+  --bg: #101319;
+  --bar: #161a22;
   --panel: #131720;
-  --line: #242a3a;
-  --fg: #d7dae0;
-  --dim: #8b93a7;
-  --accent: #7aa2f7;
-  --ok: #9ece6a;
-  --err: #f7768e;
+  --line: #252b38;
+  --fg: #c8cdd8;
+  --dim: #8a93a3;
+  --accent: #8ea3c0;
+  --ok: #9db38f;
+  --err: #c98a92;
 }
 
 * {
@@ -269,7 +269,7 @@ button.icon {
 }
 
 .pane.active {
-  border-color: #2f3a55;
+  border-color: #2b3342;
 }
 
 /* 悬浮标题栏：不占布局高度，悬停/聚焦/出错时浮出。 */
@@ -374,7 +374,7 @@ button.icon {
 
 .pane-term .xterm-viewport {
   scrollbar-width: thin;
-  scrollbar-color: #333a4d transparent;
+  scrollbar-color: #333a48 transparent;
 }
 
 /* -------------------------------------------------------------- editor */
@@ -536,8 +536,8 @@ button.icon {
 #login-submit {
   width: 100%;
   padding: 9px 14px;
-  background: #24304a;
-  border-color: #3a4256;
+  background: #232a36;
+  border-color: #333b4b;
 }
 
 .login-card .ttl {
