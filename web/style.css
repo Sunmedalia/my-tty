@@ -382,8 +382,14 @@ button.icon {
 }
 
 .pane-term .xterm-viewport {
+  /* xterm.css 默认把 viewport 底色写死为 #000；行数取整后底部会露出一条黑边。 */
+  background-color: transparent !important;
   scrollbar-width: thin;
   scrollbar-color: #333a48 transparent;
+}
+
+.pane-term .xterm {
+  background-color: var(--bg);
 }
 
 /* -------------------------------------------------------------- editor */
