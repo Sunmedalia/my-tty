@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 端到端冒烟：真实二进制 + 真实 PTY + 真实 WebSocket。
+# 端到端冒烟：真实二进制 + 真实登录 + 真实 PTY + 真实 WebSocket。
+# 任何一个检查失败，脚本都会非零退出（set -e + pipefail）。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -8,9 +9,11 @@ PORT="${PORT:-17387}"
 PASSWORD="smoke-pass-$(date +%s)"
 BIN="./zig-out/bin/my-tty"
 ROOT="$(mktemp -d)"
-COOKIE_JAR="$(mktemp)"
 LOG="$(mktemp)"
+COOKIE_JAR="$(mktemp)"
 PID=""
+BASE="http://127.0.0.1:$PORT"
+API="$BASE/api/fs"
 
 cleanup() {
   if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
@@ -21,54 +24,72 @@ cleanup() {
 }
 trap cleanup EXIT
 
+pass() { echo "$1: PASS"; }
+
 zig build
 
 "$BIN" --host 127.0.0.1 --port "$PORT" --password "$PASSWORD" --root "$ROOT" >"$LOG" 2>&1 &
 PID=$!
 
-for _ in $(seq 1 50); do
-  if curl -fsS "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.1
-done
-
 echo "== index =="
-curl -fsS "http://127.0.0.1:$PORT/" | grep -q 'id="workspace"' && echo "index: PASS"
+# 第一个真实请求自带连接重试，不单独发就绪探测请求。
+curl -fsS --retry 50 --retry-connrefused --retry-delay 1 "$BASE/" | grep -q 'id="workspace"'
+pass index
+
 echo "== embedded vendor =="
-curl -fsS "http://127.0.0.1:$PORT/vendor/xterm/xterm.js" -o /dev/null \
-  && echo "xterm.js: PASS"
+curl -fsS "$BASE/vendor/xterm/xterm.js" -o /dev/null
+pass xterm.js
+
 echo "== security headers =="
-curl -fsSI "http://127.0.0.1:$PORT/" | grep -qi 'x-content-type-options: nosniff' \
-  && echo "headers: PASS"
+curl -fsSI "$BASE/" | grep -qi 'x-content-type-options: nosniff'
+pass headers
+
 echo "== auth =="
-code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/fs/list?path=")
-[ "$code" = "401" ] && echo "unauthenticated blocked: PASS"
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$API/list?path=")
+[ "$code" = "401" ]
+pass "unauthenticated blocked"
+
 curl -fsS -c "$COOKIE_JAR" -H 'content-type: application/json' \
-  -d "{\"password\":\"$PASSWORD\"}" "http://127.0.0.1:$PORT/api/auth/login" | grep -q '"ok":true' \
-  && echo "login: PASS"
-code=$(curl -sS -o /dev/null -w '%{http_code}' -c /dev/null -H 'content-type: application/json' \
-  -d '{"password":"wrong"}' "http://127.0.0.1:$PORT/api/auth/login")
-[ "$code" = "401" ] && echo "wrong password rejected: PASS"
+  -d "{\"password\":\"$PASSWORD\"}" "$BASE/api/auth/login" | grep -q '"ok":true'
+pass login
+
+code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
+  -d '{"password":"wrong"}' "$BASE/api/auth/login")
+[ "$code" = "401" ]
+pass "wrong password rejected"
 
 echo "== fs api =="
-API="http://127.0.0.1:$PORT/api/fs"
-curl -fsS -b "$COOKIE_JAR" "$API/list?path=" | grep -q '"entries"' && echo "list: PASS"
-curl -fsS -X PUT -b "$COOKIE_JAR" --data-binary 'smoke content' "$API/write?path=note.txt" | grep -q '"ok":true'   && echo "write: PASS"
-curl -fsS -b "$COOKIE_JAR" "$API/read?path=note.txt" | grep -q 'smoke content' && echo "read: PASS"
-curl -fsS -X POST -b "$COOKIE_JAR" "$API/mkdir?path=a/b" | grep -q '"ok":true' && echo "mkdir: PASS"
-curl -fsS -X POST -b "$COOKIE_JAR" "$API/rename?from=note.txt&to=a/note.txt" | grep -q '"ok":true'   && echo "rename: PASS"
+curl -fsS -b "$COOKIE_JAR" "$API/list?path=" | grep -q '"entries"'
+pass list
+
+curl -fsS -X PUT -b "$COOKIE_JAR" --data-binary 'smoke content' "$API/write?path=note.txt" | grep -q '"ok":true'
+pass write
+
+curl -fsS -b "$COOKIE_JAR" "$API/read?path=note.txt" | grep -q 'smoke content'
+pass read
+
+curl -fsS -X POST -b "$COOKIE_JAR" "$API/mkdir?path=a/b" | grep -q '"ok":true'
+pass mkdir
+
+curl -fsS -X POST -b "$COOKIE_JAR" "$API/rename?from=note.txt&to=a/note.txt" | grep -q '"ok":true'
+pass rename
+
 code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$API/read?path=../etc/passwd")
-[ "$code" = "400" ] && echo "traversal blocked: PASS"
-curl -fsS -X DELETE -b "$COOKIE_JAR" "$API/delete?path=a" | grep -q '"ok":true' && echo "delete: PASS"
+[ "$code" = "400" ]
+pass "traversal blocked"
+
+curl -fsS -X DELETE -b "$COOKIE_JAR" "$API/delete?path=a" | grep -q '"ok":true'
+pass delete
 
 echo "== websocket + pty =="
-node scripts/ws_test.mjs "http://127.0.0.1:$PORT" "$PASSWORD" "MYTTY_RESULT_OK" "Linux" "/dev/pts/"
+node scripts/ws_test.mjs "$BASE" "$PASSWORD" "MYTTY_RESULT_OK" "Linux" "/dev/pts/"
+pass "websocket + pty"
 
 echo "== logout =="
-curl -fsS -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "http://127.0.0.1:$PORT/api/auth/logout" >/dev/null
+curl -fsS -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE/api/auth/logout" >/dev/null
 code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$API/list?path=")
-[ "$code" = "401" ] && echo "logout invalidates session: PASS"
+[ "$code" = "401" ]
+pass "logout invalidates session"
 
 echo
 echo "全部通过（服务端日志见下方）"
