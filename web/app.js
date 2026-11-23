@@ -615,10 +615,11 @@
 
   async function refreshAuth() {
     try {
+      // 状态接口本身也要求认证：401 就是“未登录”。
       const res = await fetch("/api/auth/status");
-      const data = await res.json();
-      if (data.authenticated) startApp();
-      else showLogin();
+      if (res.ok) startApp();
+      else if (res.status === 401) showLogin();
+      else showLogin(`服务端错误（HTTP ${res.status}）`);
     } catch (_) {
       showLogin("无法连接服务端");
     }

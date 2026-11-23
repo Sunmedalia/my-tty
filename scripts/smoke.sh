@@ -45,9 +45,11 @@ curl -fsSI "$BASE/" | grep -qi 'x-content-type-options: nosniff'
 pass headers
 
 echo "== auth =="
-code=$(curl -sS -o /dev/null -w '%{http_code}' "$API/list?path=")
-[ "$code" = "401" ]
-pass "unauthenticated blocked"
+for path in "/api/fs/list?path=" "/api/auth/status" "/api/auth/ticket" "/api/auth/logout"; do
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X GET "$BASE$path")
+  [ "$code" = "401" ]
+done
+pass "all APIs except login require auth"
 
 curl -fsS -c "$COOKIE_JAR" -H 'content-type: application/json' \
   -d "{\"password\":\"$PASSWORD\"}" "$BASE/api/auth/login" | grep -q '"ok":true'

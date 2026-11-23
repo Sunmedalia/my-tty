@@ -142,9 +142,12 @@ Zig 单进程
 
 ### 5.3 登录接口
 
+除 `POST /api/auth/login`（登录入口，必然要求未认证）外，以下端点都要求有效会话，
+未登录一律 401：
+
 | 方法 | 路径 | 语义 |
 |---|---|---|
-| POST | `/api/auth/login` | JSON `{"password":…}`；成功返回 `Set-Cookie` 会话，7 天 |
+| POST | `/api/auth/login` | JSON `{"password":…}`；成功返回 `Set-Cookie` 会话，7 天（唯一免认证端点） |
 | POST | `/api/auth/logout` | 删除服务端会话并清 Cookie |
 | GET | `/api/auth/status` | `{"authenticated":bool}` |
 | POST | `/api/auth/ticket` | 已登录时签发 30 秒一次性 WS 票据 |
@@ -242,7 +245,7 @@ my-tty/
 
 ### P0.5 登录认证（已完成）
 
-- [x] 弹窗登录、注销按钮；未登录时终端/文件 API/WS 全部 401。
+- [x] 弹窗登录、注销按钮；除登录端点外，所有 API/WS 未登录一律 401。
 - [x] 会话 7 天（可配 1–365），服务端内存会话 + HttpOnly Cookie。
 - [x] 注销删除服务端会话并清 Cookie；页面刷新保持登录。
 - [x] headless Chromium 验收：错误密码提示、登录、刷新保持、注销失效。

@@ -117,19 +117,17 @@ fn handleHttp(
 ) !void {
     const path = util.pathOnly(request.head.target);
 
-    // 登录相关端点必须放在鉴权之前，否则没法登录。
+    // 唯一的例外：登录端点本身。没有它就无法获得会话。
     if (std.mem.eql(u8, path, "/api/auth/login")) return handleLogin(io, gpa, cfg, auth_state, request);
-    if (std.mem.eql(u8, path, "/api/auth/logout")) return handleLogout(auth_state, request);
-    if (std.mem.eql(u8, path, "/api/auth/status")) return handleStatus(auth_state, request);
-    if (std.mem.eql(u8, path, "/api/auth/ticket")) {
-        if (!authorized(auth_state, request)) return deny(request);
-        return handleTicket(auth_state, request);
-    }
 
-    // 文件 API 自己校验 HTTP 方法，所以放在统一的 GET/HEAD 检查之前。
+    // 其余所有 API（含注销、状态、票据）都必须先通过会话认证。
     if (std.mem.startsWith(u8, path, "/api/")) {
         if (!authorized(auth_state, request)) return deny(request);
-        return fsapi.handle(io, gpa, fs, request);
+        if (std.mem.eql(u8, path, "/api/auth/logout")) return handleLogout(auth_state, request);
+        if (std.mem.eql(u8, path, "/api/auth/status")) return handleStatus(auth_state, request);
+        if (std.mem.eql(u8, path, "/api/auth/ticket")) return handleTicket(auth_state, request);
+        if (std.mem.startsWith(u8, path, "/api/fs/")) return fsapi.handle(io, gpa, fs, request);
+        return respond(request, "{\"error\":\"not_found\"}\n", .not_found);
     }
 
     // HEAD 由 respond 透明处理（省略 body），所以和 GET 走同一套路由。
@@ -235,13 +233,9 @@ fn handleTicket(auth_state: *auth.Auth, request: *http.Server.Request) !void {
 }
 
 fn handleStatus(auth_state: *auth.Auth, request: *http.Server.Request) !void {
+    _ = auth_state; // 能走到这里说明路由前已经校验过会话
     if (request.head.method != .GET) return respond(request, "method not allowed\n", .method_not_allowed);
-    const ok = authorized(auth_state, request);
-    return respond(
-        request,
-        if (ok) "{\"authenticated\":true}" else "{\"authenticated\":false}",
-        .ok,
-    );
+    return respond(request, "{\"authenticated\":true}", .ok);
 }
 
 // ---------------------------------------------------------------------------
