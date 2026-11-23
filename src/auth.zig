@@ -15,6 +15,7 @@ pub const Auth = struct {
     io: Io,
     password: []const u8,
     ttl_days: u32,
+    idle_hours: u32,
     mutex: Io.Mutex = .init,
     sessions: [max_sessions]Session = @splat(.{}),
     tickets: [max_tickets]Ticket = @splat(.{}),
@@ -22,6 +23,7 @@ pub const Auth = struct {
     const Session = struct {
         id: [16]u8 = @splat(0),
         expires_ns: i96 = 0,
+        last_seen_ns: i96 = 0,
         used: bool = false,
     };
 
@@ -40,8 +42,18 @@ pub const Auth = struct {
         expires_at_s: i64,
     };
 
-    pub fn init(io: Io, password: []const u8, ttl_days: u32) Auth {
-        return .{ .io = io, .password = password, .ttl_days = ttl_days };
+    pub fn init(io: Io, password: []const u8, ttl_days: u32, idle_hours: u32) Auth {
+        return .{
+            .io = io,
+            .password = password,
+            .ttl_days = ttl_days,
+            .idle_hours = idle_hours,
+        };
+    }
+
+    fn idleNs(self: *const Auth) i96 {
+        const hours: i96 = @intCast(self.idle_hours);
+        return hours * 60 * 60 * std.time.ns_per_s;
     }
 
     fn ttlNs(self: *const Auth) i96 {
@@ -81,6 +93,7 @@ pub const Auth = struct {
         self.sessions[slot] = .{
             .id = raw,
             .expires_ns = now + ttl,
+            .last_seen_ns = now,
             .used = true,
         };
 
@@ -102,13 +115,21 @@ pub const Auth = struct {
         defer self.mutex.unlock(self.io);
 
         const now = self.nowNs();
+        const idle_limit = self.idleNs();
         for (&self.sessions) |*s| {
             if (!s.used) continue;
             if (s.expires_ns <= now) {
                 s.used = false;
                 continue;
             }
-            if (std.mem.eql(u8, &s.id, &raw)) return true;
+            if (self.idle_hours != 0 and now - s.last_seen_ns > idle_limit) {
+                s.used = false;
+                continue;
+            }
+            if (std.mem.eql(u8, &s.id, &raw)) {
+                s.last_seen_ns = now;
+                return true;
+            }
         }
         return false;
     }
@@ -160,6 +181,26 @@ pub const Auth = struct {
             }
         }
         return false;
+    }
+
+    /// 定期清理过期/空闲会话与一次性票据。
+    pub fn sweep(self: *Auth) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        const now = self.nowNs();
+        const idle_limit = self.idleNs();
+        for (&self.sessions) |*s| {
+            if (!s.used) continue;
+            if (s.expires_ns <= now) {
+                s.used = false;
+                continue;
+            }
+            if (self.idle_hours != 0 and now - s.last_seen_ns > idle_limit) s.used = false;
+        }
+        for (&self.tickets) |*t| {
+            if (t.used and t.expires_ns <= now) t.used = false;
+        }
     }
 
     pub fn logout(self: *Auth, cookie_value: []const u8) void {
@@ -247,7 +288,7 @@ test "cookie header parsing" {
 
 test "login validate logout" {
     const io = std.testing.io;
-    var auth = Auth.init(io, "correct horse", 7);
+    var auth = Auth.init(io, "correct horse", 7, 24);
 
     try std.testing.expect(auth.login("wrong") == null);
 
@@ -261,14 +302,14 @@ test "login validate logout" {
 
 test "zero ttl expires immediately" {
     const io = std.testing.io;
-    var auth = Auth.init(io, "pw", 0);
+    var auth = Auth.init(io, "pw", 0, 24);
     const session = auth.login("pw").?;
     try std.testing.expect(!auth.validate(&session.cookie));
 }
 
 test "ticket is one time" {
     const io = std.testing.io;
-    var auth = Auth.init(io, "pw", 7);
+    var auth = Auth.init(io, "pw", 7, 24);
     const ticket = auth.issueTicket().?;
     try std.testing.expect(auth.consumeTicket(&ticket));
     try std.testing.expect(!auth.consumeTicket(&ticket));

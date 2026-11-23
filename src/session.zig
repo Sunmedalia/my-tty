@@ -24,6 +24,43 @@ const Allocator = std.mem.Allocator;
 /// 同时在线的会话数；连接线程在创建 PTY 前先占位。
 var live_sessions = std.atomic.Value(u32).init(0);
 
+/// 当前活着的 shell/tmux 客户端，用于 SIGTERM 时统一回收。
+var registry_mutex: Io.Mutex = .init;
+var registry: [128]posix.pid_t = @splat(-1);
+
+fn registerChild(io: Io, pid: posix.pid_t) void {
+    registry_mutex.lockUncancelable(io);
+    defer registry_mutex.unlock(io);
+    for (&registry) |*slot| {
+        if (slot.* < 0) {
+            slot.* = pid;
+            return;
+        }
+    }
+}
+
+fn unregisterChild(io: Io, pid: posix.pid_t) void {
+    registry_mutex.lockUncancelable(io);
+    defer registry_mutex.unlock(io);
+    for (&registry) |*slot| {
+        if (slot.* == pid) {
+            slot.* = -1;
+            return;
+        }
+    }
+}
+
+pub fn killAll(io: Io) void {
+    registry_mutex.lockUncancelable(io);
+    defer registry_mutex.unlock(io);
+    for (registry) |pid| {
+        if (pid > 0) {
+            _ = linux.kill(pid, .HUP);
+            _ = linux.kill(pid, .TERM);
+        }
+    }
+}
+
 pub const SessionError = error{ TooManySessions, PtySpawnFailed };
 
 pub const Control = struct {
@@ -42,17 +79,35 @@ pub fn run(
     ws: *http.Server.WebSocket,
     stream: *const net.Stream,
     cfg: *const config.Config,
+    tmux_path: ?[]const u8,
+    reconnect: ?[]const u8,
 ) !void {
     const previous = live_sessions.fetchAdd(1, .acq_rel);
     defer _ = live_sessions.fetchSub(1, .acq_rel);
     if (previous >= cfg.max_sessions) return error.TooManySessions;
+
+    // 有 tmux 时用固定名字的会话：断线/刷新后可以 reattach。
+    var session_name: ?[16]u8 = null;
+    if (tmux_path != null) {
+        if (parseSessionName(reconnect)) |name| {
+            session_name = name;
+        } else {
+            var raw: [8]u8 = undefined;
+            io.random(&raw);
+            session_name = std.fmt.bytesToHex(raw, .lower);
+        }
+    }
 
     const spawned = pty.spawn(gpa, .{
         .shell = cfg.shell,
         .environ = cfg.environ,
         .cols = 80,
         .rows = 24,
+        .tmux_path = tmux_path,
+        .session_name = if (session_name) |n| &n else null,
     }) catch return error.PtySpawnFailed;
+    registerChild(io, spawned.child);
+    defer unregisterChild(io, spawned.child);
 
     var session: Session = .{
         .io = io,
@@ -65,8 +120,11 @@ pub fn run(
 
     session.pump_thread = std.Thread.spawn(.{}, pump, .{&session}) catch null;
 
-    var hello_buf: [96]u8 = undefined;
-    const hello = std.fmt.bufPrint(&hello_buf, "{{\"t\":\"ready\",\"pid\":{d}}}", .{spawned.child}) catch "{\"t\":\"ready\"}";
+    var hello_buf: [128]u8 = undefined;
+    const hello = if (session_name) |name|
+        std.fmt.bufPrint(&hello_buf, "{{\"t\":\"ready\",\"pid\":{d},\"session\":\"{s}\"}}", .{ spawned.child, name }) catch "{\"t\":\"ready\"}"
+    else
+        std.fmt.bufPrint(&hello_buf, "{{\"t\":\"ready\",\"pid\":{d}}}", .{spawned.child}) catch "{\"t\":\"ready\"}";
     try session.sendText(hello);
 
     while (true) {
@@ -78,6 +136,16 @@ pub fn run(
             else => return,
         }
     }
+}
+
+/// 只接受 16 位十六进制，防止把任意字符串塞进 tmux 会话名。
+fn parseSessionName(value: ?[]const u8) ?[16]u8 {
+    const v = value orelse return null;
+    if (v.len != 16) return null;
+    for (v) |c| if (!std.ascii.isHex(c)) return null;
+    var out: [16]u8 = undefined;
+    @memcpy(&out, v);
+    return out;
 }
 
 const Session = struct {

@@ -14,11 +14,21 @@
         <span class="brand">my-tty</span>
         <span id="status"></span>
         <span class="spacer"></span>
-        <span id="hint">Ctrl+Shift+C 复制 · Ctrl+Shift+V 粘贴</span>
+        <span id="hint">Ctrl+Shift+C 复制 · Ctrl+Shift+V 粘贴 · Ctrl+Shift+F 查找</span>
+        <button id="font-dec" class="icon" type="button" title="缩小字号">A−</button>
+        <button id="font-inc" class="icon" type="button" title="放大字号">A+</button>
         <button id="toggle-files" type="button">文件</button>
         <button id="add-pane" type="button">+ 分屏</button>
         <button id="logout" type="button">注销</button>
       </header>
+
+      <div id="find-bar" hidden>
+        <input id="find-input" type="text" placeholder="在当前终端中查找…" autocomplete="off" spellcheck="false" />
+        <span id="find-count"></span>
+        <button id="find-prev" class="icon" type="button" title="上一个 (Shift+F3)">↑</button>
+        <button id="find-next" class="icon" type="button" title="下一个 (F3)">↓</button>
+        <button id="find-close" class="icon" type="button" title="关闭 (Esc)">✕</button>
+      </div>
 
       <div id="body">
         <aside id="files" hidden>
@@ -32,10 +42,28 @@
           </div>
           <ul id="file-list"></ul>
           <p id="notice"></p>
+          <div id="upload-progress" hidden>
+            <div class="bar"><span id="uprog-fill"></span></div>
+            <span id="uprog-text"></span>
+            <button id="uprog-cancel" class="icon" type="button" title="取消上传">✕</button>
+          </div>
           <input id="upload-input" type="file" multiple hidden />
         </aside>
 
         <main id="workspace" data-count="0"></main>
+      </div>
+
+      <div id="keys" aria-label="移动端快捷键">
+        <button type="button" data-key="esc">Esc</button>
+        <button type="button" data-key="tab">Tab</button>
+        <button type="button" data-key="ctrl">Ctrl</button>
+        <button type="button" data-key="up">↑</button>
+        <button type="button" data-key="down">↓</button>
+        <button type="button" data-key="left">←</button>
+        <button type="button" data-key="right">→</button>
+        <button type="button" data-key="ctrlc">^C</button>
+        <button type="button" data-key="ctrld">^D</button>
+        <button type="button" data-key="ctrll">^L</button>
       </div>
     </div>
 
@@ -65,13 +93,18 @@
           <button id="editor-save" type="button">保存</button>
           <button id="editor-close" type="button">关闭</button>
         </header>
-        <textarea id="editor" spellcheck="false" autocomplete="off"></textarea>
+        <div class="editor-body">
+          <pre id="editor-gutter" aria-hidden="true"></pre>
+          <textarea id="editor" spellcheck="false" autocomplete="off"></textarea>
+        </div>
         <footer>Ctrl+S 保存 · Esc 关闭</footer>
       </section>
     </div>
 
     <script src="/vendor/xterm/xterm.js"></script>
     <script src="/vendor/xterm/addon-fit.js"></script>
+    <script src="/vendor/xterm/addon-search.js"></script>
+    <script src="/vendor/xterm/addon-web-links.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

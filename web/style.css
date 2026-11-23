@@ -1,6 +1,6 @@
 @font-face {
   font-family: "JetBrains Mono";
-  src: url("/vendor/fonts/JetBrainsMono-Regular.ttf") format("truetype");
+  src: url("/vendor/fonts/JetBrainsMono-Regular.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
   font-display: block;
@@ -566,4 +566,200 @@ button.icon {
 #files.drop {
   outline: 2px dashed var(--accent);
   outline-offset: -4px;
+}
+
+/* --------------------------------------------------------- find / keys */
+
+#find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  background: var(--bar);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+#find-bar[hidden] {
+  display: none;
+}
+
+#find-input {
+  width: min(260px, 40vw);
+  padding: 4px 8px;
+  border: 1px solid #2f3648;
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+#find-input:focus {
+  border-color: var(--accent);
+}
+
+#find-count {
+  min-width: 46px;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+#keys {
+  display: none;
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 5px 6px;
+  overflow-x: auto;
+  background: var(--bar);
+  border-top: 1px solid var(--line);
+}
+
+#keys button {
+  flex: 0 0 auto;
+  min-width: 36px;
+  padding: 7px 9px;
+  font-size: 12px;
+}
+
+#keys button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+@media (pointer: coarse) {
+  #keys {
+    display: flex;
+  }
+}
+
+@media (max-width: 820px) {
+  #keys {
+    display: flex;
+  }
+}
+
+/* ------------------------------------------------------ upload progress */
+
+#upload-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 11px;
+}
+
+#upload-progress[hidden] {
+  display: none;
+}
+
+#upload-progress .bar {
+  flex: 1 1 auto;
+  height: 4px;
+  background: #252b38;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+#uprog-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
+#uprog-text {
+  white-space: nowrap;
+}
+
+#upload-progress .icon {
+  padding: 1px 5px;
+}
+
+/* ------------------------------------------------------------- maximize */
+
+#workspace.maximized {
+  grid-template-columns: 1fr !important;
+  grid-template-rows: 1fr !important;
+}
+
+#workspace.maximized .pane {
+  visibility: hidden;
+}
+
+#workspace.maximized .pane.maximized {
+  visibility: visible;
+  grid-area: 1 / 1 / 2 / 2 !important;
+}
+
+/* ------------------------------------------------------------ splitters */
+
+#workspace {
+  position: relative;
+}
+
+.splitter {
+  position: absolute;
+  z-index: 4;
+  background: transparent;
+}
+
+.splitter:hover,
+.splitter.dragging {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.splitter.v {
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  transform: translateX(-50%);
+}
+
+.splitter.h {
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: row-resize;
+  transform: translateY(-50%);
+}
+
+/* --------------------------------------------------------- editor gutter */
+
+.editor-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--bg);
+}
+
+#editor-gutter {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 12px 8px 12px 12px;
+  overflow: hidden;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+  color: #5f6880;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: right;
+  user-select: none;
+}
+
+#editor {
+  padding: 12px 14px;
+}
+
+#file-list .entry.drop-target {
+  background: #222c3f;
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
 }

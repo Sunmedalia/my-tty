@@ -61,9 +61,21 @@ pub const all = [_]Asset{
         .cache_control = "public, max-age=86400",
     },
     .{
-        .path = "/vendor/fonts/JetBrainsMono-Regular.ttf",
-        .mime = "font/ttf",
-        .body = web.jetbrains_mono_ttf,
+        .path = "/vendor/xterm/addon-search.js",
+        .mime = js,
+        .body = web.addon_search_js,
+        .cache_control = "public, max-age=86400",
+    },
+    .{
+        .path = "/vendor/xterm/addon-web-links.js",
+        .mime = js,
+        .body = web.addon_web_links_js,
+        .cache_control = "public, max-age=86400",
+    },
+    .{
+        .path = "/vendor/fonts/JetBrainsMono-Regular.woff2",
+        .mime = "font/woff2",
+        .body = web.jetbrains_mono_woff2,
         .cache_control = "public, max-age=86400",
     },
 };

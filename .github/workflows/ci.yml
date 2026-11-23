@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: format
+        run: zig fmt --check build.zig src/*.zig web/embed.zig
+      - name: build
+        run: zig build
+      - name: test
+        run: zig test src/tests.zig
+      - name: smoke
+        run: ./scripts/smoke.sh
+      - name: release build
+        run: ./scripts/build-release.sh
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: install browser deps
+        working-directory: tests/browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: browser tests
+        run: ./scripts/browser_test.sh

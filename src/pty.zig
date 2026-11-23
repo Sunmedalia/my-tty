@@ -41,6 +41,9 @@ pub const SpawnOptions = struct {
     environ: std.process.Environ,
     cols: u16 = 80,
     rows: u16 = 24,
+    /// 非空时用 `tmux new-session -A` 承载 shell（会话名为 `mytty-<hex>`）。
+    tmux_path: ?[]const u8 = null,
+    session_name: ?*const [16]u8 = null,
 };
 
 pub fn spawn(gpa: std.mem.Allocator, opts: SpawnOptions) SpawnError!Pty {
@@ -50,7 +53,39 @@ pub fn spawn(gpa: std.mem.Allocator, opts: SpawnOptions) SpawnError!Pty {
     const home_z = try homePath(gpa, opts.environ);
     defer if (home_z) |h| gpa.free(h);
 
-    var argv = [_]?[*:0]const u8{ shell_z.ptr, "-l", null };
+    var tmux_z: ?[:0]const u8 = null;
+    defer if (tmux_z) |t| gpa.free(t);
+    var session_z: ?[:0]const u8 = null;
+    defer if (session_z) |n| gpa.free(n);
+    if (opts.tmux_path) |path| {
+        tmux_z = try gpa.dupeSentinel(u8, path, 0);
+        if (opts.session_name) |name| {
+            session_z = try std.fmt.allocPrintSentinel(gpa, "mytty-{s}", .{name}, 0);
+        }
+    }
+
+    var argv_storage: [8]?[*:0]const u8 = undefined;
+    var argv_len: usize = 0;
+    if (tmux_z) |tmux| {
+        argv_storage[0] = tmux.ptr;
+        argv_storage[1] = "new-session";
+        argv_storage[2] = "-A";
+        argv_storage[3] = "-s";
+        if (session_z) |name| {
+            argv_storage[4] = name.ptr;
+            // 仍然尊重 --shell：tmux 内启动的登录 shell。
+            argv_storage[5] = shell_z.ptr;
+            argv_storage[6] = "-l";
+            argv_len = 7;
+        } else {
+            argv_len = 4;
+        }
+    } else {
+        argv_storage[0] = shell_z.ptr;
+        argv_storage[1] = "-l";
+        argv_len = 2;
+    }
+    argv_storage[argv_len] = null;
     var env_buf: [512]?[*:0]const u8 = undefined;
     buildEnviron(&env_buf, opts.environ);
 
@@ -98,7 +133,7 @@ pub fn spawn(gpa: std.mem.Allocator, opts: SpawnOptions) SpawnError!Pty {
         _ = linux.dup2(slave, 2);
         if (slave > 2) _ = linux.close(slave);
         if (home_z) |h| _ = linux.chdir(h.ptr);
-        _ = linux.execve(shell_z.ptr, @ptrCast(&argv), @ptrCast(&env_buf[0]));
+        _ = linux.execve(argv_storage[0].?, @ptrCast(&argv_storage), @ptrCast(&env_buf[0]));
         linux.exit(127);
     }
 

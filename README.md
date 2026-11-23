@@ -7,12 +7,14 @@
 
 | 能力 | 状态 |
 |---|---|
-| 登录认证（弹窗登录 / 会话 7 天 / 主动注销） | ✅ |
-| HTTP 静态资源（内嵌） | ✅ |
+| 登录认证（弹窗登录 / 7 天会话 / 空闲超时 / 注销） | ✅ |
+| 登录限流、连接上限、Origin 校验、优雅退出 | ✅ |
 | WebSocket ⇄ Linux PTY，真实 shell | ✅ |
+| tmux 持久会话（断线/刷新可 reattach） | ✅ |
+| 分屏 1–4、可拖拽分栏、最大化、字号调节 | ✅ |
+| 终端搜索 / 链接 / 移动端按键条 | ✅ |
+| 文件管理、文本编辑、上传（分片续传）/ 下载 / 目录 tar | ✅ |
 | 配置文件 / 环境变量 / 命令行三层配置 | ✅ |
-| 文件管理 + 文本编辑 + 上传/下载 | ✅ |
-| 分屏 1–4 终端（3 屏左一整高） | ✅ |
 
 ## 构建与运行
 
@@ -43,31 +45,39 @@ zig test src/tests.zig
   "shell": "/bin/bash",
   "password": "please-change-me",
   "session_ttl_days": 7,
+  "session_idle_hours": 24,
+  "max_connections": 64,
+  "tmux": true,
   "root": "/srv/work",
   "max_sessions": 16
 }
 ```
 
 环境变量：`MYTTY_CONFIG`、`MYTTY_HOST`、`MYTTY_PORT`、`MYTTY_SHELL`、
-`MYTTY_PASSWORD`、`MYTTY_SESSION_TTL_DAYS`、`MYTTY_ROOT`、
-`MYTTY_MAX_SESSIONS`。完整参数见 `my-tty --help`。
+`MYTTY_PASSWORD`、`MYTTY_SESSION_TTL_DAYS`、`MYTTY_SESSION_IDLE_HOURS`、
+`MYTTY_MAX_CONNECTIONS`、`MYTTY_ROOT`、`MYTTY_MAX_SESSIONS`。
+完整参数见 `my-tty --help`；仓库里有一份 `my-tty.example.json`。
+`my-tty --check-config` 只校验配置与 root，不启动服务。
 
 ## 登录认证
 
 - 页面打开后先出现登录弹窗；未登录时终端、文件 API、WebSocket 全部拒绝。
 - 密码只保存在服务端配置里，浏览器拿到的是随机会话 Cookie：
   `HttpOnly; SameSite=Strict; Path=/`，反向代理以 HTTPS 终止时自动加 `Secure`。
-- 会话默认 **7 天**，由 `--session-ttl-days` / `session_ttl_days` 调整（1–365）。
+- 会话默认 **7 天**，由 `--session-ttl-days` 调整（1–365）；空闲超时默认 24 小时，
+  由 `--session-idle-hours` 调整（0 关闭）。
 - 顶栏“注销”会同时清除服务端会话与 Cookie；所有终端随之关闭。
-- 会话只存在内存中，进程重启后需要重新登录。
-- WebSocket 额外使用一次性票据（30 秒、用后即废），避免把长期会话放进 URL。
+- 会话只存在内存中，进程重启后需要重新登录；一次性 WS 票据 30 秒失效。
+- 同一 IP 连续失败 5 次登录会封禁 5 分钟（429 + `Retry-After`）；
+  并发连接数默认上限 64。
 
 ## 文件管理与编辑
 
 左侧“文件”面板以 `--root`（默认当前目录）为边界，支持列目录、新建文件/目录、
 重命名、递归删除、上传/下载，以及纯文本编辑（≤1 MiB，`Ctrl+S` 保存）。
-上传可以点工具栏的 ⇪，也可以把文件直接拖进面板；单个文件上限 64 MiB。
-下载走流式响应，带 `Content-Disposition: attachment`，不占内存。
+上传可以点 ⇪、拖进面板，或拖到某个目录行；文件按 4 MiB 分片，带进度条和取消，
+网络中断时会向服务端查询已写入偏移继续传；单个文件上限 64 MiB。
+下载流式响应、带 `Content-Disposition: attachment`；目录可以下载成 `.tar`。
 路径参数一律相对 root，服务端用 realpath 前缀校验，`..` 和符号链接都无法越界。
 HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 `POST /api/fs/mkdir|rename`、`DELETE /api/fs/delete`。
@@ -76,11 +86,22 @@ HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 
 `+ 分屏` 最多 4 个：2 屏左右均分；3 屏左边一个占满整高、右边上下均分；
 4 屏 2×2。每个 pane 是独立的终端、WebSocket 和 PTY，关闭 pane 会回收对应 shell。
+分栏可以拖拽；pane 右上角可最大化；`Ctrl+Shift+F` 搜索，`Ctrl+Shift+±` 调整字号，
+`F3` 下一个匹配。移动端会显示 Esc/Tab/Ctrl/方向键/^C/^D/^L 按键条。
+
+启用 tmux 时（默认，检测到 `/usr/bin/tmux` 即生效），每个 pane 的 shell 跑在
+`mytty-<16 hex>` 会话里，断线或刷新后会用同一个会话名重新 attach，环境变量与
+正在运行的程序都会保留；`--shell` 指定的 shell 仍会作为 tmux 内的登录 shell 启动。
+`--no-tmux` 可关闭。关掉 pane 只会 detach，tmux 会话仍在后台，可用
+`tmux ls` / `tmux kill-session -t mytty-<id>` 管理。
 
 ## 安全边界
 
 - 默认只监听 `127.0.0.1`；除登录端点本身外，**所有 `/api/*` 与 WebSocket 都必须携带有效会话**，否则一律 401。
-- 密码比较使用定长时间实现；登录失败固定延迟 250ms，降低爆破速度。
+- 密码比较使用定长时间实现；登录失败固定延迟 250ms，并有按 IP 的失败封禁。
+- HTTP 阶段有 30 秒读写超时（防 slowloris）；WebSocket 升级后取消读超时。
+- 带 `Origin` 的 WebSocket 请求必须与 `Host` 一致；一次性票据防止跨站复用。
+- `SIGTERM`/`SIGINT` 会停止 accept、回收所有 PTY 后退出。
 - 文件管理/编辑只允许访问 `root` 下的真实路径，符号链接无法逃逸。
 - 会话数受 `max_sessions` 限制；分屏上限 4。
 
@@ -100,6 +121,10 @@ TLS 不属于本项目：请让进程只监听回环地址，把明文 HTTP/WS �
 ## 验证
 
 ```sh
-zig test src/tests.zig   # 配置、认证/会话、PTY 环境、协议、文件边界
-./scripts/smoke.sh       # 真实进程：登录/注销、文件 API、WebSocket+PTY
+zig test src/tests.zig        # 配置、认证/会话、PTY 环境、协议、文件边界
+./scripts/smoke.sh            # 真实进程：认证/限流、文件/分片/归档、WS+PTY、优雅退出
+./scripts/browser_test.sh     # 浏览器回归（先 npm --prefix tests/browser ci 并装 chromium）
+./scripts/build-release.sh    # ReleaseSafe + strip
 ```
+
+CI 在 `.github/workflows/ci.yml`：格式检查、构建、单测、smoke，以及独立的浏览器任务。

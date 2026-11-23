@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 文件 | `JetBrainsMono-Regular.ttf` |
+| 文件 | `JetBrainsMono-Regular.woff2`（由完整 TTF 子集化，仅保留终端需要的字符，约 40 KB） |
 | 版本 | v2.304 |
 | 来源 | https://github.com/JetBrains/JetBrainsMono/tree/v2.304 |
 | 许可证 | SIL Open Font License 1.1（见 `OFL.txt`） |
@@ -19,8 +19,12 @@ Terminal 之前完成字体加载，TUI 边框与色块就是连续的。
 ## 升级
 
 ```sh
-curl -L -o web/vendor/fonts/JetBrainsMono-Regular.ttf \
+# 1) 下载完整字体
+curl -L -o /tmp/JetBrainsMono-Regular.ttf \
   https://raw.githubusercontent.com/JetBrains/JetBrainsMono/<tag>/fonts/ttf/JetBrainsMono-Regular.ttf
+# 2) 子集化为 woff2（npx subset-font 或自写脚本，保留 ASCII/Latin-1/
+#    General Punctuation/Arrows/Box Drawing/Block Elements/Geometric/Braille）
+# 3) 放到 web/vendor/fonts/JetBrainsMono-Regular.woff2
 curl -L -o web/vendor/fonts/OFL.txt \
   https://raw.githubusercontent.com/JetBrains/JetBrainsMono/<tag>/OFL.txt
 ```

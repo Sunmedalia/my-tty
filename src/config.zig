@@ -20,6 +20,12 @@ pub const Config = struct {
     password: ?[]const u8 = null,
     /// 登录会话有效期（天）。
     session_ttl_days: u32 = 7,
+    /// 会话空闲超时（小时）；0 表示只看绝对有效期。
+    session_idle_hours: u32 = 24,
+    /// 最大并发 TCP 连接数。
+    max_connections: u32 = 64,
+    /// 启动时检测到 tmux 就用它承载 shell，断线可重连。
+    tmux: bool = true,
     /// 同时存在的终端会话上限，防止一次误操作 fork 出几百个 shell。
     max_sessions: u32 = 16,
     /// 文件管理/编辑的可访问根目录；所有路径都被限制在它下面。
@@ -34,6 +40,7 @@ pub const Config = struct {
         InvalidHost,
         EmptyPassword,
         InvalidSessionTtl,
+        InvalidMaxConnections,
         ConfigReadFailed,
         ConfigInvalid,
         OutOfMemory,
@@ -49,6 +56,10 @@ pub const Config = struct {
         \\  --shell <path>       登录 shell（默认 $SHELL 或 /bin/bash）
         \\  --password <secret>  登录密码；不填则每次启动随机生成
         \\  --session-ttl-days <n>  登录有效期，默认 7 天
+        \\  --session-idle-hours <n>  空闲超时，默认 24 小时（0 关闭）
+        \\  --max-connections <n>  最大并发连接，默认 64
+        \\  --no-tmux            不自动使用 tmux 持久会话
+        \\  --check-config       只校验配置与 root，然后退出
         \\  --root <dir>         文件管理根目录（默认当前目录）
         \\  --max-sessions <n>   并发会话上限（默认 16）
         \\  -h, --help           显示本帮助
@@ -60,13 +71,16 @@ pub const Config = struct {
         \\    "shell": "/bin/bash",
         \\    "password": "change-me",
         \\    "session_ttl_days": 7,
+        \\    "session_idle_hours": 24,
+        \\    "max_connections": 64,
+        \\    "tmux": true,
         \\    "root": "/srv/work",
         \\    "max_sessions": 16
         \\  }
         \\
         \\环境变量: MYTTY_CONFIG / MYTTY_HOST / MYTTY_PORT / MYTTY_SHELL /
-        \\          MYTTY_PASSWORD / MYTTY_SESSION_TTL_DAYS /
-        \\          MYTTY_ROOT / MYTTY_MAX_SESSIONS
+        \\          MYTTY_PASSWORD / MYTTY_SESSION_TTL_DAYS / MYTTY_SESSION_IDLE_HOURS /
+        \\          MYTTY_MAX_CONNECTIONS / MYTTY_ROOT / MYTTY_MAX_SESSIONS
         \\
         \\TLS 不在本程序范围内：请只监听回环地址，把明文 HTTP/WS 交给外部反向代理。
         \\
@@ -79,6 +93,9 @@ pub const Config = struct {
         shell: ?[]const u8 = null,
         password: ?[]const u8 = null,
         session_ttl_days: ?u32 = null,
+        session_idle_hours: ?u32 = null,
+        max_connections: ?u32 = null,
+        tmux: ?bool = null,
         root: ?[]const u8 = null,
         max_sessions: ?u32 = null,
     };
@@ -102,6 +119,8 @@ pub const Config = struct {
         if (env.get("MYTTY_ROOT")) |v| cfg.root = v;
         if (env.get("MYTTY_PASSWORD")) |v| cfg.password = v;
         if (env.get("MYTTY_SESSION_TTL_DAYS")) |v| cfg.session_ttl_days = try parseCount(v);
+        if (env.get("MYTTY_SESSION_IDLE_HOURS")) |v| cfg.session_idle_hours = try parseCount(v);
+        if (env.get("MYTTY_MAX_CONNECTIONS")) |v| cfg.max_connections = try parseCount(v);
         if (env.get("MYTTY_PORT")) |v| cfg.port = try parsePort(v);
         if (env.get("MYTTY_MAX_SESSIONS")) |v| cfg.max_sessions = try parseCount(v);
         if (env.get("MYTTY_SHELL")) |v| {
@@ -128,6 +147,14 @@ pub const Config = struct {
                 cfg.password = v;
             } else if (optionValue(args, &i, "--session-ttl-days")) |v| {
                 cfg.session_ttl_days = try parseCount(v);
+            } else if (optionValue(args, &i, "--session-idle-hours")) |v| {
+                cfg.session_idle_hours = try parseCount(v);
+            } else if (optionValue(args, &i, "--max-connections")) |v| {
+                cfg.max_connections = try parseCount(v);
+            } else if (std.mem.eql(u8, arg, "--no-tmux")) {
+                cfg.tmux = false;
+            } else if (std.mem.eql(u8, arg, "--check-config")) {
+                // main 在启动前单独处理
             } else if (optionValue(args, &i, "--root")) |v| {
                 cfg.root = v;
             } else if (optionValue(args, &i, "--max-sessions")) |v| {
@@ -155,6 +182,8 @@ pub const Config = struct {
             if (p.len == 0) return error.EmptyPassword;
         }
         if (cfg.session_ttl_days == 0 or cfg.session_ttl_days > 365) return error.InvalidSessionTtl;
+        if (cfg.session_idle_hours > 8760) return error.InvalidSessionTtl;
+        if (cfg.max_connections == 0 or cfg.max_connections > 4096) return error.InvalidMaxConnections;
     }
 };
 
@@ -180,6 +209,9 @@ fn loadConfigFile(
     if (file.shell) |v| cfg.shell = try alloc.dupe(u8, v);
     if (file.password) |v| cfg.password = try alloc.dupe(u8, v);
     if (file.session_ttl_days) |v| cfg.session_ttl_days = v;
+    if (file.session_idle_hours) |v| cfg.session_idle_hours = v;
+    if (file.max_connections) |v| cfg.max_connections = v;
+    if (file.tmux) |v| cfg.tmux = v;
     if (file.root) |v| cfg.root = try alloc.dupe(u8, v);
     if (file.max_sessions) |v| cfg.max_sessions = v;
     return file.shell != null;
@@ -244,6 +276,18 @@ test "constant time equality" {
     try std.testing.expect(constantTimeEql("abc", "abc"));
     try std.testing.expect(!constantTimeEql("abc", "abd"));
     try std.testing.expect(!constantTimeEql("abc", "ab"));
+}
+
+test "validate connection and idle bounds" {
+    var cfg: Config = .{};
+    try cfg.validate();
+    cfg.max_connections = 0;
+    try std.testing.expectError(error.InvalidMaxConnections, cfg.validate());
+    cfg.max_connections = 4097;
+    try std.testing.expectError(error.InvalidMaxConnections, cfg.validate());
+    cfg.max_connections = 64;
+    cfg.session_idle_hours = 8761;
+    try std.testing.expectError(error.InvalidSessionTtl, cfg.validate());
 }
 
 test "validate session ttl bounds" {

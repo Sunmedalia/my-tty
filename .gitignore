@@ -5,6 +5,10 @@ zig-out/
 # 本地配置（可能含 token，不要提交）
 my-tty.json
 
+# Node / 浏览器测试
+node_modules/
+tests/browser/node_modules/
+
 # 杂项
 .DS_Store
 *.log

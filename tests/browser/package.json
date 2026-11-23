@@ -1,0 +1,7 @@
+{
+  "name": "my-tty-browser-tests",
+  "private": true,
+  "devDependencies": {
+    "playwright": "1.65.1"
+  }
+}

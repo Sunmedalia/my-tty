@@ -1,14 +1,16 @@
 //! HTTP 路由 + 连接生命周期。
 //!
 //! 只用 std.http.Server；一条连接一个线程，静态资源全部来自内存。
-//! 除登录页外壳外，所有功能（文件 API、WebSocket/PTY）都要求
-//! 已登录的会话 Cookie。这里没有任何 TLS 代码。
+//! 除登录页外壳外，所有功能（文件 API、WebSocket/PTY）都要求已登录会话。
+//! 这里没有任何 TLS 代码。
 
 const std = @import("std");
 const http = std.http;
 const net = std.Io.net;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const linux = std.os.linux;
+const posix = std.posix;
 
 const assets = @import("assets.zig");
 const auth = @import("auth.zig");
@@ -24,39 +26,104 @@ const security_headers = [_]http.Header{
     .{ .name = "content-security-policy", .value = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" },
 };
 
+/// 读/写 socket 超时；只用于 HTTP 阶段，WebSocket 升级后读超时会清零。
+const io_timeout_seconds: isize = 30;
+
+var shutting_down = std.atomic.Value(bool).init(false);
+var listen_handle = std.atomic.Value(posix.fd_t).init(-1);
+var active_connections = std.atomic.Value(u32).init(0);
+
+fn onSignal(_: posix.SIG) callconv(.c) void {
+    shutting_down.store(true, .release);
+    const fd = listen_handle.load(.acquire);
+    if (fd >= 0) _ = linux.shutdown(fd, 2); // SHUT_RDWR
+}
+
+fn installSignalHandlers() void {
+    const act: posix.Sigaction = .{
+        .handler = .{ .handler = onSignal },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(.TERM, &act, null);
+    posix.sigaction(.INT, &act, null);
+}
+
 pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     const fs = fsapi.Fs.init(io, gpa, cfg.root) catch |err| {
         std.debug.print("无法打开 root={s}: {t}\n", .{ cfg.root, err });
         return err;
     };
+    defer gpa.free(fs.root);
 
-    var auth_state = auth.Auth.init(io, cfg.password orelse unreachable, cfg.session_ttl_days);
+    var auth_state = auth.Auth.init(io, cfg.password orelse unreachable, cfg.session_ttl_days, cfg.session_idle_hours);
+    var limiter: LoginLimiter = .{ .io = io };
+    const tmux_path = if (cfg.tmux) findExecutable(io, gpa, cfg.environ, "tmux") else null;
+    defer if (tmux_path) |p| gpa.free(p);
 
     const addr = try net.IpAddress.parseIp4(cfg.host, cfg.port);
     var listener = try addr.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
+    listen_handle.store(listener.socket.handle, .release);
+    defer listen_handle.store(-1, .release);
 
-    std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  root={s}  会话={d} 天\n", .{
+    installSignalHandlers();
+
+    const maint = std.Thread.spawn(.{}, maintenance, .{ io, &auth_state }) catch null;
+    _ = maint;
+
+    std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  root={s}  会话={d}天/{d}h  连接≤{d}  持久会话={s}\n", .{
         cfg.host,
         cfg.port,
-        cfg.shell,
+        if (tmux_path) |p| p else cfg.shell,
         fs.root,
         cfg.session_ttl_days,
+        cfg.session_idle_hours,
+        cfg.max_connections,
+        if (tmux_path != null) "tmux" else "off",
     });
 
     while (true) {
-        const stream = listener.accept(io) catch |err| switch (err) {
-            error.Canceled => return err,
-            else => {
-                std.debug.print("accept 失败: {t}\n", .{err});
-                continue;
-            },
+        const stream = listener.accept(io) catch |err| {
+            if (shutting_down.load(.acquire)) break;
+            switch (err) {
+                error.Canceled => break,
+                else => {
+                    std.debug.print("accept 失败: {t}\n", .{err});
+                    continue;
+                },
+            }
         };
-        const thread = std.Thread.spawn(.{}, connectionMain, .{ io, gpa, stream, cfg, &fs, &auth_state }) catch {
+
+        const prev = active_connections.fetchAdd(1, .acq_rel);
+        if (prev >= cfg.max_connections) {
+            _ = active_connections.fetchSub(1, .acq_rel);
+            stream.close(io);
+            continue;
+        }
+
+        setSocketTimeout(stream.socket.handle, posix.SO.RCVTIMEO, io_timeout_seconds);
+        setSocketTimeout(stream.socket.handle, posix.SO.SNDTIMEO, io_timeout_seconds);
+
+        const thread = std.Thread.spawn(.{}, connectionMain, .{
+            io, gpa, stream, cfg, &fs, &auth_state, &limiter, tmux_path,
+        }) catch {
+            _ = active_connections.fetchSub(1, .acq_rel);
             stream.close(io);
             continue;
         };
         thread.detach();
+    }
+
+    std.debug.print("正在退出：回收 shell…\n", .{});
+    session.killAll(io);
+    std.debug.print("已退出\n", .{});
+}
+
+fn maintenance(io: Io, auth_state: *auth.Auth) void {
+    while (!shutting_down.load(.acquire)) {
+        Io.sleep(io, Io.Duration.fromSeconds(300), .real) catch return;
+        auth_state.sweep();
     }
 }
 
@@ -67,8 +134,14 @@ fn connectionMain(
     cfg: *const config.Config,
     fs: *const fsapi.Fs,
     auth_state: *auth.Auth,
+    limiter: *LoginLimiter,
+    tmux_path: ?[]const u8,
 ) void {
-    defer stream.close(io);
+    defer {
+        _ = active_connections.fetchSub(1, .acq_rel);
+        stream.close(io);
+    }
+    const peer = stream.socket.address;
 
     var read_buf: [64 * 1024]u8 = undefined;
     var write_buf: [16 * 1024]u8 = undefined;
@@ -77,6 +150,8 @@ fn connectionMain(
     var server: http.Server = .init(&reader.interface, &writer.interface);
 
     while (true) {
+        // 每个 HTTP 请求都给一次慢请求超时；WebSocket 升级后单独清零。
+        setSocketTimeout(stream.socket.handle, posix.SO.RCVTIMEO, io_timeout_seconds);
         var request = server.receiveHead() catch return;
 
         switch (request.upgradeRequested()) {
@@ -85,12 +160,19 @@ fn connectionMain(
                     respond(&request, "bad websocket request\n", .bad_request) catch {};
                     return;
                 };
+                if (!originAllowed(&request)) {
+                    respond(&request, "origin not allowed\n", .forbidden) catch {};
+                    return;
+                }
                 if (!wsAuthorized(auth_state, &request)) {
                     respond(&request, "unauthorized\n", .unauthorized) catch {};
                     return;
                 }
+                // 终端可能空闲很久，升级后取消读超时。
+                setSocketTimeout(stream.socket.handle, posix.SO.RCVTIMEO, 0);
+                const reconnect = util.queryParam(request.head.target, "session");
                 var ws = request.respondWebSocket(.{ .key = key }) catch return;
-                session.run(io, gpa, &ws, &stream, cfg) catch |err| {
+                session.run(io, gpa, &ws, &stream, cfg, tmux_path, reconnect) catch |err| {
                     std.debug.print("会话结束: {t}\n", .{err});
                     ws.writeMessage("{\"t\":\"error\"}", .text) catch {};
                 };
@@ -101,7 +183,7 @@ fn connectionMain(
                 return;
             },
             .none => {
-                handleHttp(io, gpa, cfg, fs, auth_state, &request) catch return;
+                handleHttp(io, gpa, cfg, fs, auth_state, limiter, peer, &request) catch return;
             },
         }
     }
@@ -113,12 +195,16 @@ fn handleHttp(
     cfg: *const config.Config,
     fs: *const fsapi.Fs,
     auth_state: *auth.Auth,
+    limiter: *LoginLimiter,
+    peer: net.IpAddress,
     request: *http.Server.Request,
 ) !void {
     const path = util.pathOnly(request.head.target);
 
     // 唯一的例外：登录端点本身。没有它就无法获得会话。
-    if (std.mem.eql(u8, path, "/api/auth/login")) return handleLogin(io, gpa, cfg, auth_state, request);
+    if (std.mem.eql(u8, path, "/api/auth/login")) {
+        return handleLogin(io, gpa, cfg, auth_state, limiter, peer, request);
+    }
 
     // 其余所有 API（含注销、状态、票据）都必须先通过会话认证。
     if (std.mem.startsWith(u8, path, "/api/")) {
@@ -164,15 +250,28 @@ fn handleLogin(
     gpa: Allocator,
     cfg: *const config.Config,
     auth_state: *auth.Auth,
+    limiter: *LoginLimiter,
+    peer: net.IpAddress,
     request: *http.Server.Request,
 ) !void {
     if (request.head.method != .POST) return respond(request, "method not allowed\n", .method_not_allowed);
+
+    if (limiter.blockedSeconds(peer)) |retry| {
+        var retry_buf: [24]u8 = undefined;
+        const retry_text = std.fmt.bufPrint(&retry_buf, "{d}", .{retry}) catch "60";
+        var headers: [8]http.Header = undefined;
+        const list = buildHeaders(&headers, &.{
+            .{ .name = "content-type", .value = "application/json; charset=utf-8" },
+            .{ .name = "retry-after", .value = retry_text },
+        });
+        return request.respond("{\"error\":\"too_many_attempts\"}", .{ .status = .too_many_requests, .extra_headers = list });
+    }
 
     // 读 body 之后 head/header 迭代器不再可用，先把 Cookie 相关判断做掉。
     const secure = auth.isSecureRequest(request);
 
     var body_buf: [4096]u8 = undefined;
-    const reader = request.readerExpectNone(&body_buf);
+    const reader = request.readerExpectContinue(&body_buf) catch return respond(request, "{\"error\":\"bad_body\"}\n", .bad_request);
     const body = reader.allocRemaining(gpa, .limited(4096)) catch
         return respond(request, "{\"error\":\"bad_body\"}\n", .bad_request);
     defer gpa.free(body);
@@ -184,8 +283,19 @@ fn handleLogin(
     const login = auth_state.login(parsed.value.password) orelse {
         // 简单延迟，降低在线爆破速度；不阻塞其它连接线程。
         Io.sleep(io, Io.Duration.fromMilliseconds(250), .real) catch {};
+        if (limiter.noteFailure(peer)) |retry| {
+            var retry_buf: [24]u8 = undefined;
+            const retry_text = std.fmt.bufPrint(&retry_buf, "{d}", .{retry}) catch "60";
+            var headers: [8]http.Header = undefined;
+            const list = buildHeaders(&headers, &.{
+                .{ .name = "content-type", .value = "application/json; charset=utf-8" },
+                .{ .name = "retry-after", .value = retry_text },
+            });
+            return request.respond("{\"error\":\"too_many_attempts\"}", .{ .status = .too_many_requests, .extra_headers = list });
+        }
         return respond(request, "{\"error\":\"invalid_password\"}\n", .unauthorized);
     };
+    limiter.noteSuccess(peer);
 
     const ttl_seconds: i64 = @as(i64, @intCast(cfg.session_ttl_days)) * 86400;
     var cookie_buf: [256]u8 = undefined;
@@ -239,6 +349,100 @@ fn handleStatus(auth_state: *auth.Auth, request: *http.Server.Request) !void {
 }
 
 // ---------------------------------------------------------------------------
+// 登录限流
+// ---------------------------------------------------------------------------
+
+const LoginLimiter = struct {
+    io: Io,
+    mutex: Io.Mutex = .init,
+    entries: [32]Entry = @splat(.{}),
+
+    const Entry = struct {
+        ip: net.IpAddress = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
+        used: bool = false,
+        failures: u32 = 0,
+        window_ns: i96 = 0,
+        blocked_until_ns: i96 = 0,
+    };
+
+    const window_ns: i96 = 10 * 60 * std.time.ns_per_s;
+    const block_ns: i96 = 5 * 60 * std.time.ns_per_s;
+    const max_failures = 5;
+
+    fn now(self: *LoginLimiter) i96 {
+        return Io.Clock.real.now(self.io).nanoseconds;
+    }
+
+    fn key(ip: net.IpAddress) net.IpAddress {
+        var k = ip;
+        k.setPort(0);
+        return k;
+    }
+
+    fn find(self: *LoginLimiter, k: net.IpAddress) ?usize {
+        for (&self.entries, 0..) |*e, i| {
+            if (e.used and net.IpAddress.eql(&e.ip, &k)) return i;
+        }
+        return null;
+    }
+
+    fn slot(self: *LoginLimiter, k: net.IpAddress) usize {
+        if (self.find(k)) |i| return i;
+        for (&self.entries, 0..) |*e, i| {
+            if (!e.used) return i;
+        }
+        var oldest: usize = 0;
+        var oldest_ns: i96 = std.math.maxInt(i96);
+        for (&self.entries, 0..) |*e, i| {
+            if (e.window_ns < oldest_ns) {
+                oldest_ns = e.window_ns;
+                oldest = i;
+            }
+        }
+        return oldest;
+    }
+
+    fn blockedSeconds(self: *LoginLimiter, ip: net.IpAddress) ?u32 {
+        const k = key(ip);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        const i = self.find(k) orelse return null;
+        const wait_ns = self.entries[i].blocked_until_ns - self.now();
+        if (wait_ns <= 0) return null;
+        return @intCast(@divTrunc(wait_ns, std.time.ns_per_s) + 1);
+    }
+
+    /// 返回非 null 表示该 IP 已被封禁。
+    fn noteFailure(self: *LoginLimiter, ip: net.IpAddress) ?u32 {
+        const k = key(ip);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        const i = self.slot(k);
+        const e = &self.entries[i];
+        const ts = self.now();
+        if (!e.used or ts - e.window_ns > window_ns) {
+            e.* = .{ .ip = k, .used = true, .window_ns = ts };
+        }
+        e.failures += 1;
+        if (e.failures >= max_failures) {
+            e.failures = 0;
+            e.blocked_until_ns = ts + block_ns;
+            return @intCast(@divTrunc(block_ns, std.time.ns_per_s));
+        }
+        return null;
+    }
+
+    fn noteSuccess(self: *LoginLimiter, ip: net.IpAddress) void {
+        const k = key(ip);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.find(k)) |i| self.entries[i] = .{};
+    }
+};
+
+// ---------------------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------------------
 
@@ -252,6 +456,41 @@ fn wsAuthorized(auth_state: *auth.Auth, request: *const http.Server.Request) boo
     if (authorized(auth_state, request)) return true;
     const ticket = util.queryParam(request.head.target, "ticket") orelse return false;
     return auth_state.consumeTicket(ticket);
+}
+
+/// 浏览器带 Origin 时，必须与 Host 一致；非浏览器客户端可以不带。
+fn originAllowed(request: *const http.Server.Request) bool {
+    var origin: ?[]const u8 = null;
+    var host: ?[]const u8 = null;
+    var forwarded_host: ?[]const u8 = null;
+    var it = request.iterateHeaders();
+    while (it.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "origin")) origin = header.value;
+        if (std.ascii.eqlIgnoreCase(header.name, "host")) host = header.value;
+        if (std.ascii.eqlIgnoreCase(header.name, "x-forwarded-host")) forwarded_host = header.value;
+    }
+    const o = origin orelse return true;
+    const expected = blk: {
+        if (host) |h| {
+            // 反向代理如果把 Host 改写成上游地址，X-Forwarded-Host 才是外部名字。
+            if (forwarded_host) |fh| {
+                var parts = std.mem.splitScalar(u8, fh, ',');
+                const first = std.mem.trim(u8, parts.first(), " \t");
+                if (first.len > 0) break :blk first;
+            }
+            break :blk h;
+        }
+        if (forwarded_host) |fh| break :blk std.mem.trim(u8, fh, " \t");
+        return false;
+    };
+    const rest = if (std.mem.startsWith(u8, o, "http://"))
+        o["http://".len..]
+    else if (std.mem.startsWith(u8, o, "https://"))
+        o["https://".len..]
+    else
+        return false;
+    const trimmed = std.mem.trimEnd(u8, rest, "/");
+    return std.ascii.eqlIgnoreCase(trimmed, expected);
 }
 
 fn deny(request: *http.Server.Request) !void {
@@ -272,4 +511,34 @@ fn buildHeaders(dst: []http.Header, extra: []const http.Header) []const http.Hea
     @memcpy(dst[0..extra.len], extra);
     @memcpy(dst[extra.len..][0..security_headers.len], &security_headers);
     return dst[0 .. extra.len + security_headers.len];
+}
+
+fn setSocketTimeout(fd: posix.fd_t, opt: u32, seconds: isize) void {
+    if (seconds < 0) return;
+    const tv: posix.timeval = .{ .sec = seconds, .usec = 0 };
+    posix.setsockopt(fd, posix.SOL.SOCKET, opt, std.mem.asBytes(&tv)) catch {};
+}
+
+/// 在 PATH 里找可执行文件；只用于可选的 tmux。
+fn findExecutable(io: Io, alloc: Allocator, environ: std.process.Environ, name: []const u8) ?[]const u8 {
+    const path_env = blk: {
+        for (environ.block.view().slice) |entry| {
+            const text = std.mem.span(entry);
+            if (std.mem.startsWith(u8, text, "PATH=")) break :blk text["PATH=".len..];
+        }
+        return null;
+    };
+
+    var it = std.mem.splitScalar(u8, path_env, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const full = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name }) catch return null;
+        const ok = blk: {
+            std.Io.Dir.cwd().access(io, full, .{}) catch break :blk false;
+            break :blk true;
+        };
+        if (ok) return full;
+        alloc.free(full);
+    }
+    return null;
 }

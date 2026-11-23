@@ -27,6 +27,17 @@
   const loginPassword = document.getElementById("login-password");
   const loginError = document.getElementById("login-error");
   const loginSubmit = document.getElementById("login-submit");
+  const findBar = document.getElementById("find-bar");
+  const findInput = document.getElementById("find-input");
+  const findCount = document.getElementById("find-count");
+  const fontDecBtn = document.getElementById("font-dec");
+  const fontIncBtn = document.getElementById("font-inc");
+  const keysBar = document.getElementById("keys");
+  const uploadProgress = document.getElementById("upload-progress");
+  const uprogFill = document.getElementById("uprog-fill");
+  const uprogText = document.getElementById("uprog-text");
+  const uprogCancel = document.getElementById("uprog-cancel");
+  const editorGutter = document.getElementById("editor-gutter");
 
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   const wsBase = `${scheme}//${location.host}/ws`;
@@ -36,10 +47,18 @@
   let currentDir = "";
   let editing = null; // { path, dirty }
   let started = false;
+  let fontsize = clampFont(parseInt(localStorage.getItem("myttty.fontsize") || "14", 10) || 14);
+  let splitX = parseFloat(localStorage.getItem("myttty.splitX") || "0.5") || 0.5;
+  let splitY = parseFloat(localStorage.getItem("myttty.splitY") || "0.5") || 0.5;
+  let uploader = null; // { xhr, id, cancelled }
+
+  function clampFont(n) {
+    return Math.min(24, Math.max(10, n));
+  }
 
   // ---------------------------------------------------------------- terminals
 
-  function createPane() {
+  function createPane(initialSession = "") {
     if (panes.length >= MAX_PANES) return;
 
     const el = document.createElement("section");
@@ -48,6 +67,7 @@
       <div class="pane-bar">
         <span class="pane-dot"></span>
         <span class="pane-status">连接中…</span>
+        <button class="pane-max" type="button" title="最大化 / 还原">⤢</button>
         <button class="pane-close" type="button" title="关闭此分屏">✕</button>
       </div>
       <div class="pane-term"></div>`;
@@ -63,7 +83,7 @@
       cursorStyle: "block",
       fontFamily:
         '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
-      fontSize: 14,
+      fontSize: fontsize,
       scrollback: 5000,
       allowProposedApi: false,
       macOptionIsMeta: true,
@@ -71,9 +91,25 @@
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
+    const search = new SearchAddon.SearchAddon();
+    term.loadAddon(search);
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
     term.open(termEl);
 
-    const pane = { el, termEl, term, fit, bar, status, dot, ws: null, alive: false, reconnect: null };
+    const pane = {
+      el,
+      termEl,
+      term,
+      fit,
+      search,
+      bar,
+      status,
+      dot,
+      sessionId: initialSession,
+      ws: null,
+      alive: false,
+      reconnect: null,
+    };
     panes.push(pane);
 
     term.attachCustomKeyEventHandler((event) => handleTermKey(event, pane));
@@ -86,6 +122,10 @@
       ev.stopPropagation();
       removePane(pane);
     });
+    el.querySelector(".pane-max").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      toggleMaximize(pane);
+    });
     status.addEventListener("click", () => {
       if (!pane.alive && pane.reconnect) pane.reconnect();
     });
@@ -93,6 +133,15 @@
     connectPane(pane);
     layout();
     focusPane(pane);
+  }
+
+  function saveSessions() {
+    try {
+      sessionStorage.setItem(
+        "myttty.sessions",
+        JSON.stringify(panes.map((p) => p.sessionId || ""))
+      );
+    } catch (_) {}
   }
 
   function focusPane(pane) {
@@ -117,6 +166,7 @@
       activePane = panes[Math.min(idx, panes.length - 1)] || null;
       if (activePane) focusPane(activePane);
     }
+    saveSessions();
     if (panes.length === 0) {
       if (respawn && started) createPane();
     } else {
@@ -144,8 +194,10 @@
     }
 
     let ws;
+    let url = `${wsBase}?ticket=${encodeURIComponent(ticket)}`;
+    if (pane.sessionId) url += `&session=${encodeURIComponent(pane.sessionId)}`;
     try {
-      ws = new WebSocket(`${wsBase}?ticket=${encodeURIComponent(ticket)}`);
+      ws = new WebSocket(url);
     } catch (err) {
       setPaneStatus(pane, "连接失败", "error");
       return;
@@ -171,7 +223,10 @@
       } catch (_) {
         return;
       }
-      if (msg.t === "exit") {
+      if (msg.t === "ready" && msg.session) {
+        pane.sessionId = msg.session;
+        saveSessions();
+      } else if (msg.t === "exit") {
         setPaneStatus(pane, "Shell 已退出（点击重连）", "error");
       } else if (msg.t === "error") {
         setPaneStatus(pane, "会话异常（点击重连）", "error");
@@ -205,6 +260,12 @@
   }
 
   function sendInput(pane, data) {
+    if (ctrlSticky && data.length === 1) {
+      const code = data.toUpperCase().charCodeAt(0);
+      if (code >= 64 && code <= 95) data = String.fromCharCode(code - 64);
+      ctrlSticky = false;
+      if (keysBar) keysBar.querySelector('[data-key="ctrl"]').classList.remove("active");
+    }
     const ws = pane.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const bytes = new TextEncoder().encode(data);
@@ -249,54 +310,130 @@
     sendResize(pane);
   }
 
-  function layout() {
-    const n = panes.length;
-    workspace.dataset.count = String(n);
+  const splitters = { v: null, h: null };
 
-    for (const p of panes) {
-      p.el.style.gridArea = "";
+  function ensureSplitters() {
+    if (!splitters.v) {
+      const v = document.createElement("div");
+      v.className = "splitter v";
+      v.addEventListener("pointerdown", (ev) => startSplitDrag(ev, "x"));
+      workspace.appendChild(v);
+      splitters.v = v;
     }
+    if (!splitters.h) {
+      const h = document.createElement("div");
+      h.className = "splitter h";
+      h.addEventListener("pointerdown", (ev) => startSplitDrag(ev, "y"));
+      workspace.appendChild(h);
+      splitters.h = h;
+    }
+  }
 
-    if (n === 2) {
-      workspace.style.gridTemplateColumns = "1fr 1fr";
-      workspace.style.gridTemplateRows = "1fr";
-    } else if (n === 3) {
-      // 左一半整高，右一半上下均分。
-      workspace.style.gridTemplateColumns = "1fr 1fr";
+  function clampSplit(v) {
+    return Math.min(0.85, Math.max(0.15, v));
+  }
+
+  function startSplitDrag(ev, axis) {
+    ev.preventDefault();
+    const el = ev.currentTarget;
+    el.setPointerCapture(ev.pointerId);
+    el.classList.add("dragging");
+
+    const move = (e) => {
+      const r = workspace.getBoundingClientRect();
+      if (axis === "x") {
+        splitX = clampSplit((e.clientX - r.left) / r.width);
+        localStorage.setItem("myttty.splitX", String(splitX));
+      } else {
+        splitY = clampSplit((e.clientY - r.top) / r.height);
+        localStorage.setItem("myttty.splitY", String(splitY));
+      }
+      applyGrid();
+    };
+    const up = () => {
+      el.classList.remove("dragging");
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  }
+
+  function positionSplitters() {
+    const n = panes.length;
+    if (splitters.v) {
+      splitters.v.hidden = n < 2;
+      splitters.v.style.left = `${splitX * 100}%`;
+    }
+    if (splitters.h) {
+      splitters.h.hidden = n !== 4;
+      splitters.h.style.top = `${splitY * 100}%`;
+    }
+  }
+
+  function applyGrid() {
+    const n = panes.length;
+    for (const p of panes) p.el.style.gridArea = "";
+
+    const cols = n >= 2 ? `${splitX}fr ${1 - splitX}fr` : "1fr";
+    if (n === 3) {
+      workspace.style.gridTemplateColumns = cols;
       workspace.style.gridTemplateRows = "1fr 1fr";
       panes[0].el.style.gridArea = "1 / 1 / span 2 / span 1";
     } else if (n === 4) {
-      workspace.style.gridTemplateColumns = "1fr 1fr";
-      workspace.style.gridTemplateRows = "1fr 1fr";
+      workspace.style.gridTemplateColumns = cols;
+      workspace.style.gridTemplateRows = `${splitY}fr ${1 - splitY}fr`;
+    } else if (n === 2) {
+      workspace.style.gridTemplateColumns = cols;
+      workspace.style.gridTemplateRows = "1fr";
     } else {
       workspace.style.gridTemplateColumns = "1fr";
       workspace.style.gridTemplateRows = "1fr";
     }
 
-    addPaneBtn.disabled = n >= MAX_PANES;
-    updateSummary();
-
+    positionSplitters();
     requestAnimationFrame(() => {
       for (const p of panes) fitPane(p);
     });
   }
 
+  function layout() {
+    workspace.dataset.count = String(panes.length);
+    ensureSplitters();
+    applyGrid();
+    addPaneBtn.disabled = panes.length >= MAX_PANES;
+    updateSummary();
+  }
+
   // Ctrl/Cmd+Shift+C 复制，Ctrl/Cmd+Shift+V 粘贴；普通 Ctrl+C 照旧发给 shell。
   function handleTermKey(event, pane) {
     if (event.type !== "keydown") return true;
+    if (event.key === "Escape") {
+      if (workspace.classList.contains("maximized")) {
+        const max = panes.find((p) => p.el.classList.contains("maximized"));
+        if (max) toggleMaximize(max);
+        return false;
+      }
+      if (!findBar.hidden) {
+        closeFind();
+        return false;
+      }
+    }
     const mod = event.ctrlKey || event.metaKey;
     if (mod && event.shiftKey && event.code === "KeyC") {
-      const selection = pane.term.getSelection();
-      if (selection) navigator.clipboard.writeText(selection).catch(() => {});
+      copyText(pane.term.getSelection());
       return false;
     }
     if (mod && event.shiftKey && event.code === "KeyV") {
-      navigator.clipboard
-        .readText()
-        .then((text) => {
-          if (text) sendInput(pane, text);
-        })
-        .catch(() => {});
+      readClipboard().then((text) => {
+        if (text) sendInput(pane, text);
+      });
+      return false;
+    }
+    if (mod && event.shiftKey && event.code === "KeyF") {
+      openFind();
       return false;
     }
     return true;
@@ -418,10 +555,14 @@
       const actions = document.createElement("span");
       actions.className = "actions";
 
+      const entryPath = joinPath(currentDir, entry.name);
       if (entry.kind === "file") {
-        const path = joinPath(currentDir, entry.name);
         actions.appendChild(
-          smallButton("⤓", "下载", () => downloadFile(path, entry.name))
+          smallButton("⤓", "下载", () => downloadFile(entryPath, entry.name))
+        );
+      } else if (entry.kind === "directory") {
+        actions.appendChild(
+          smallButton("⤓", "下载目录（tar）", () => downloadArchive(entryPath, entry.name))
         );
       }
 
@@ -451,6 +592,23 @@
       });
       actions.appendChild(delBtn);
       li.appendChild(actions);
+
+      if (entry.kind === "directory") {
+        li.addEventListener("dragover", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          li.classList.add("drop-target");
+        });
+        li.addEventListener("dragleave", () => li.classList.remove("drop-target"));
+        li.addEventListener("drop", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          li.classList.remove("drop-target");
+          if (ev.dataTransfer && ev.dataTransfer.files.length) {
+            uploadFiles(ev.dataTransfer.files, joinPath(currentDir, entry.name));
+          }
+        });
+      }
 
       fileList.appendChild(li);
     }
@@ -484,42 +642,133 @@
     a.remove();
   }
 
-  const upload_limit = 64 * 1024 * 1024;
+  function downloadArchive(path, name) {
+    const a = document.createElement("a");
+    a.href = `/api/fs/archive?path=${encodeURIComponent(path)}`;
+    a.download = `${name}.tar`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
 
-  async function uploadFiles(fileList) {
+  const upload_limit = 64 * 1024 * 1024;
+  const upload_chunk = 4 * 1024 * 1024;
+
+  function randomUploadId() {
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  function showUploadProgress(show, fraction, text) {
+    uploadProgress.hidden = !show;
+    if (!show) return;
+    uprogFill.style.width = `${Math.max(0, Math.min(1, fraction)) * 100}%`;
+    uprogText.textContent = text;
+  }
+
+  function putChunk(url, blob, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      uploader = { xhr, cancelled: false, url };
+      xhr.open("PUT", url);
+      xhr.responseType = "text";
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable) onProgress(ev.loaded);
+      };
+      xhr.onload = () => {
+        let data = {};
+        try {
+          data = JSON.parse(xhr.responseText || "{}");
+        } catch (_) {}
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else if (xhr.status === 401) reject(new Error("unauthorized"));
+        else reject(new Error(data.error || `HTTP ${xhr.status}`));
+      };
+      xhr.onerror = () => reject(new Error("network"));
+      xhr.onabort = () => reject(new Error("cancelled"));
+      xhr.send(blob);
+    });
+  }
+
+  async function uploadOne(file, targetDir) {
+    const path = joinPath(targetDir, file.name);
+    const encoded = encodeURIComponent(path);
+    const total = file.size;
+
+    if (total === 0) {
+      const res = await fetch(`/api/fs/upload?path=${encoded}`, { method: "PUT", body: new Blob([]) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return;
+    }
+
+    const id = randomUploadId();
+    let offset = 0;
+    let retries = 0;
+
+    while (offset < total) {
+      const end = Math.min(offset + upload_chunk, total);
+      const blob = file.slice(offset, end);
+      const url =
+        `/api/fs/upload?path=${encoded}&id=${id}&offset=${offset}&total=${total}`;
+      try {
+        const data = await putChunk(url, blob, (loaded) => {
+          showUploadProgress(
+            true,
+            (offset + loaded) / total,
+            `${file.name} ${Math.round(((offset + loaded) / total) * 100)}%`
+          );
+        });
+        offset = typeof data.offset === "number" ? data.offset : end;
+        retries = 0;
+      } catch (err) {
+        if (uploader && uploader.cancelled) throw err;
+        if (err.message === "unauthorized") {
+          showLogin("登录已失效，请重新登录");
+          throw err;
+        }
+        retries++;
+        if (retries > 3) throw err;
+        // 断点续传：向服务端确认已经写入的偏移量。
+        try {
+          const res = await fetch(`/api/fs/upload?path=${encoded}&id=${id}`, { method: "GET" });
+          if (res.ok) {
+            const data = await res.json();
+            offset = data.offset || 0;
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  async function uploadFiles(fileList, targetDir = currentDir) {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
 
     let done = 0;
     let failed = 0;
+    showUploadProgress(true, 0, "准备上传…");
+
     for (const file of files) {
       if (file.size > upload_limit) {
         failed++;
         notice(`${file.name} 超过 64 MiB 上限`, true);
         continue;
       }
-      notice(`上传中 ${done + 1}/${files.length}：${file.name}`);
       try {
-        const res = await fetch(
-          `/api/fs/upload?path=${encodeURIComponent(joinPath(currentDir, file.name))}`,
-          { method: "PUT", body: file }
-        );
-        if (res.status === 401) {
-          showLogin("登录已失效，请重新登录");
-          return;
-        }
-        let data = {};
-        try {
-          data = await res.json();
-        } catch (_) {}
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await uploadOne(file, targetDir);
         done++;
       } catch (err) {
         failed++;
-        notice(`上传 ${file.name} 失败: ${err.message}`, true);
+        if (err.message !== "cancelled") {
+          notice(`上传 ${file.name} 失败: ${err.message}`, true);
+        }
+        if (uploader && uploader.cancelled) break;
       }
     }
 
+    showUploadProgress(false, 0, "");
+    uploader = null;
     if (failed === 0) notice(`已上传 ${done} 个文件`);
     else if (done > 0) notice(`上传完成 ${done} 个，失败 ${failed} 个`, true);
     refreshFiles();
@@ -552,6 +801,9 @@
   // ------------------------------------------------------------------- editor
 
   async function openEditor(path) {
+    if (editing && editing.dirty && editing.path !== path) {
+      if (!confirm("当前文件有未保存的修改，确定切换？")) return;
+    }
     try {
       const data = await api("GET", "read", { path });
       editing = { path, dirty: false };
@@ -559,6 +811,7 @@
       editorEl.value = data.content;
       editorStateEl.textContent = `${data.size} 字节 · 未修改`;
       editorOverlay.hidden = false;
+      updateGutter();
       editorEl.focus();
       editorEl.setSelectionRange(0, 0);
     } catch (err) {
@@ -590,6 +843,7 @@
     if (!editing) return;
     editing.dirty = true;
     editorStateEl.textContent = "未保存的修改";
+    updateGutter();
   });
   editorEl.addEventListener("keydown", (ev) => {
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s") {
@@ -609,6 +863,61 @@
   // -------------------------------------------------------------------- boot
 
   addPaneBtn.addEventListener("click", createPane);
+
+  findInput.addEventListener("input", () => runFind(false, true));
+  findInput.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      runFind(ev.shiftKey, false);
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      closeFind();
+    }
+  });
+  document.getElementById("find-prev").addEventListener("click", () => runFind(true, false));
+  document.getElementById("find-next").addEventListener("click", () => runFind(false, false));
+  document.getElementById("find-close").addEventListener("click", closeFind);
+
+  fontDecBtn.addEventListener("click", () => setFontSize(fontsize - 1));
+  fontIncBtn.addEventListener("click", () => setFontSize(fontsize + 1));
+
+  keysBar.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("button[data-key]");
+    if (btn) sendKey(btn.dataset.key);
+  });
+
+  window.addEventListener("keydown", (ev) => {
+    const mod = ev.ctrlKey || ev.metaKey;
+    if (mod && ev.shiftKey && (ev.key === "+" || ev.key === "=" || ev.code === "Equal")) {
+      ev.preventDefault();
+      setFontSize(fontsize + 1);
+      return;
+    }
+    if (mod && ev.shiftKey && (ev.key === "-" || ev.key === "_" || ev.code === "Minus")) {
+      ev.preventDefault();
+      setFontSize(fontsize - 1);
+      return;
+    }
+    if (ev.key === "F3") {
+      ev.preventDefault();
+      if (findBar.hidden) openFind();
+      else runFind(ev.shiftKey, false);
+      return;
+    }
+    if (ev.key === "Escape") {
+      if (!editorOverlay.hidden) return; // 编辑器自己处理
+      if (workspace.classList.contains("maximized")) {
+        ev.preventDefault();
+        const max = panes.find((p) => p.el.classList.contains("maximized"));
+        if (max) toggleMaximize(max);
+        return;
+      }
+      if (!findBar.hidden) {
+        ev.preventDefault();
+        closeFind();
+      }
+    }
+  });
   filesBtn.addEventListener("click", () => {
     filesEl.hidden = !filesEl.hidden;
     if (!filesEl.hidden) {
@@ -621,6 +930,14 @@
   document.getElementById("files-new-dir").addEventListener("click", newDir);
 
   uploadBtn.addEventListener("click", () => uploadInput.click());
+  uprogCancel.addEventListener("click", () => {
+    if (!uploader) return;
+    uploader.cancelled = true;
+    try {
+      uploader.xhr.abort();
+    } catch (_) {}
+    fetch(uploader.url.replace(/&offset=.*$/, "").replace(/&total=.*$/, ""), { method: "DELETE" }).catch(() => {});
+  });
   uploadInput.addEventListener("change", () => {
     uploadFiles(uploadInput.files);
     uploadInput.value = "";
@@ -685,6 +1002,167 @@
     brightWhite: "#e0e4ec",
   };
 
+  // ------------------------------------------------------------ 搜索/字号
+
+  function openFind() {
+    if (!activePane) return;
+    findBar.hidden = false;
+    findCount.textContent = "";
+    findInput.focus();
+    findInput.select();
+  }
+
+  function closeFind() {
+    findBar.hidden = true;
+    findCount.textContent = "";
+    for (const p of panes) {
+      p.search.clearDecorations();
+      p.term.clearSelection();
+    }
+    if (activePane) activePane.term.focus();
+    requestAnimationFrame(() => panes.forEach(fitPane));
+  }
+
+  function runFind(backwards, incremental) {
+    const pane = activePane;
+    if (!pane) return;
+    const query = findInput.value;
+    if (!query) {
+      pane.search.clearDecorations();
+      pane.term.clearSelection();
+      findCount.textContent = "";
+      return;
+    }
+    const options = { caseSensitive: false, incremental };
+    const found = backwards
+      ? pane.search.findPrevious(query, options)
+      : pane.search.findNext(query, options);
+    findCount.textContent = found ? "" : incremental ? "" : "无结果";
+  }
+
+  function setFontSize(next) {
+    fontsize = clampFont(next);
+    localStorage.setItem("myttty.fontsize", String(fontsize));
+    for (const p of panes) {
+      p.term.options.fontSize = fontsize;
+      fitPane(p);
+    }
+  }
+
+  function toggleMaximize(pane) {
+    const isMax = pane.el.classList.contains("maximized");
+    for (const p of panes) p.el.classList.remove("maximized");
+    if (isMax) {
+      workspace.classList.remove("maximized");
+    } else {
+      pane.el.classList.add("maximized");
+      workspace.classList.add("maximized");
+      focusPane(pane);
+    }
+    requestAnimationFrame(() => panes.forEach(fitPane));
+  }
+
+  // --------------------------------------------------------- 剪贴板兜底
+
+  function copyText(text) {
+    if (!text) return Promise.resolve();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(() => legacyCopy(text));
+    }
+    legacyCopy(text);
+    return Promise.resolve();
+  }
+
+  function legacyCopy(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } catch (_) {}
+    ta.remove();
+  }
+
+  function readClipboard() {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      return navigator.clipboard.readText().catch(() => Promise.resolve(prompt("粘贴内容") || ""));
+    }
+    return Promise.resolve(prompt("当前环境不支持读取剪贴板，请手动粘贴：") || "");
+  }
+
+  // ---------------------------------------------------------- 移动按键条
+
+  let ctrlSticky = false;
+
+  const keySequences = {
+    esc: "\x1b",
+    tab: "\t",
+    up: "\x1b[A",
+    down: "\x1b[B",
+    right: "\x1b[C",
+    left: "\x1b[D",
+    ctrlc: "\x03",
+    ctrld: "\x04",
+    ctrll: "\x0c",
+  };
+
+  function sendKey(name) {
+    const pane = activePane;
+    if (!pane) return;
+    if (name === "ctrl") {
+      ctrlSticky = !ctrlSticky;
+      keysBar.querySelector('[data-key="ctrl"]').classList.toggle("active", ctrlSticky);
+      pane.term.focus();
+      return;
+    }
+    const seq = keySequences[name];
+    if (seq == null) return;
+    sendInput(pane, seq);
+    if (ctrlSticky) {
+      ctrlSticky = false;
+      keysBar.querySelector('[data-key="ctrl"]').classList.remove("active");
+    }
+    pane.term.focus();
+  }
+
+  // ------------------------------------------------------------- 编辑辅助
+
+  function updateGutter() {
+    const value = editorEl.value;
+    let count = value.split("\n").length;
+    if (value.endsWith("\n")) count -= 1;
+    count = Math.max(1, count);
+    let text = "";
+    for (let i = 1; i <= count; i++) text += i + "\n";
+    editorGutter.textContent = text;
+    editorGutter.scrollTop = editorEl.scrollTop;
+  }
+
+  editorEl.addEventListener("scroll", () => {
+    editorGutter.scrollTop = editorEl.scrollTop;
+  });
+  editorEl.addEventListener("keydown", (ev) => {
+    if (ev.key === "Tab") {
+      ev.preventDefault();
+      const start = editorEl.selectionStart;
+      const end = editorEl.selectionEnd;
+      editorEl.setRangeText("  ", start, end, "end");
+      editorEl.dispatchEvent(new Event("input"));
+    }
+  });
+  window.addEventListener("beforeunload", (ev) => {
+    if (editing && editing.dirty) {
+      ev.preventDefault();
+      ev.returnValue = "";
+    }
+  });
+
+  // -------------------------------------------------------------- 弹窗
+
   // ------------------------------------------------------------- 登录状态
 
   function showLogin(message) {
@@ -709,13 +1187,27 @@
       await document.fonts.load('14px "JetBrains Mono"');
       await document.fonts.ready;
     } catch (_) {}
-    if (panes.length === 0) createPane();
-    else layout();
+    if (panes.length === 0) {
+      let restored = false;
+      try {
+        const saved = JSON.parse(sessionStorage.getItem("myttty.sessions") || "null");
+        if (Array.isArray(saved) && saved.length > 0) {
+          for (const sid of saved.slice(0, MAX_PANES)) createPane(sid || "");
+          restored = true;
+        }
+      } catch (_) {}
+      if (!restored) createPane();
+    } else {
+      layout();
+    }
     refreshFiles();
   }
 
   function stopApp() {
     started = false;
+    try {
+      sessionStorage.removeItem("myttty.sessions");
+    } catch (_) {}
     for (const pane of [...panes]) removePane(pane, false);
     panes.length = 0;
   }

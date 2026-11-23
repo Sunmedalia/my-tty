@@ -22,8 +22,9 @@ pub const Fs = struct {
     root: []const u8,
 
     pub fn init(io: Io, alloc: Allocator, root: []const u8) !Fs {
-        const abs = try Dir.cwd().realPathFileAlloc(io, root, alloc);
-        return .{ .root = abs };
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const n = try Dir.cwd().realPathFile(io, root, &buf);
+        return .{ .root = try alloc.dupe(u8, buf[0..n]) };
     }
 };
 
@@ -66,8 +67,16 @@ pub fn handle(io: Io, gpa: Allocator, fs: *const Fs, request: *http.Server.Reque
         return delete(io, arena, fs, request);
     }
     if (std.mem.eql(u8, path, "/api/fs/upload")) {
-        if (request.head.method != .PUT) return fail(request, arena, .method_not_allowed, "method_not_allowed");
-        return upload(io, arena, fs, request);
+        return switch (request.head.method) {
+            .PUT => upload(io, arena, fs, request),
+            .GET => uploadStatus(io, arena, fs, request),
+            .DELETE => uploadCancel(io, arena, fs, request),
+            else => fail(request, arena, .method_not_allowed, "method_not_allowed"),
+        };
+    }
+    if (std.mem.eql(u8, path, "/api/fs/archive")) {
+        if (request.head.method != .GET) return fail(request, arena, .method_not_allowed, "method_not_allowed");
+        return archive(io, arena, fs, request);
     }
     if (std.mem.eql(u8, path, "/api/fs/download")) {
         if (request.head.method != .GET) return fail(request, arena, .method_not_allowed, "method_not_allowed");
@@ -136,7 +145,7 @@ fn write(io: Io, gpa: Allocator, arena: Allocator, fs: *const Fs, request: *http
     }
 
     var body_buf: [4096]u8 = undefined;
-    const body_reader = request.readerExpectNone(&body_buf);
+    const body_reader = request.readerExpectContinue(&body_buf) catch return fail(request, arena, .bad_request, "bad_body");
     const body = body_reader.allocRemaining(gpa, .limited(max_write)) catch |err| switch (err) {
         error.StreamTooLong => return fail(request, arena, .payload_too_large, "body_too_large"),
         else => return fail(request, arena, .bad_request, "bad_body"),
@@ -205,6 +214,16 @@ fn upload(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
 
+    const id = util.queryParam(request.head.target, "id");
+    if (id) |raw_id| {
+        const valid = validUploadId(raw_id) orelse
+            return fail(request, arena, .bad_request, "invalid_id");
+        return uploadChunk(io, arena, fs, rel, valid, request);
+    }
+    return uploadSingle(io, arena, fs, rel, request);
+}
+
+fn uploadSingle(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, request: *http.Server.Request) !void {
     if (request.head.content_length) |len| {
         if (len > max_upload) return fail(request, arena, .payload_too_large, "upload_too_large");
     }
@@ -216,7 +235,7 @@ fn upload(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
     defer atomic.deinit(io);
 
     var head_buf: [16 * 1024]u8 = undefined;
-    const body_reader = request.readerExpectNone(&head_buf);
+    const body_reader = request.readerExpectContinue(&head_buf) catch return fail(request, arena, .bad_request, "bad_body");
 
     var chunk: [64 * 1024]u8 = undefined;
     var total: u64 = 0;
@@ -230,8 +249,195 @@ fn upload(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
 
     atomic.replace(io) catch |err| return failMapped(request, arena, err);
 
-    const Payload = struct { ok: bool, path: []const u8, size: u64 };
-    return respondJson(request, arena, .ok, Payload{ .ok = true, .path = rel, .size = total });
+    const Payload = struct { ok: bool, done: bool, path: []const u8, offset: u64 };
+    return respondJson(request, arena, .ok, Payload{ .ok = true, .done = true, .path = rel, .offset = total });
+}
+
+fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []const u8, request: *http.Server.Request) !void {
+    const offset = parseU64(util.queryParam(request.head.target, "offset") orelse "") orelse
+        return fail(request, arena, .bad_request, "invalid_offset");
+    const total = parseU64(util.queryParam(request.head.target, "total") orelse "") orelse
+        return fail(request, arena, .bad_request, "invalid_total");
+    if (total == 0 or total > max_upload) return fail(request, arena, .payload_too_large, "upload_too_large");
+    if (offset > total) return fail(request, arena, .bad_request, "invalid_offset");
+
+    const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const temp = uploadTempPath(arena, abs, id) catch
+        return fail(request, arena, .internal_server_error, "out_of_memory");
+
+    var file: std.Io.File = undefined;
+    if (offset == 0) {
+        file = Dir.cwd().createFile(io, temp, .{ .truncate = true }) catch |err|
+            return failMapped(request, arena, err);
+    } else {
+        file = Dir.cwd().openFile(io, temp, .{ .mode = .read_write }) catch |err| switch (err) {
+            error.FileNotFound => return failOffset(request, arena, .conflict, "offset_mismatch", 0),
+            else => return failMapped(request, arena, err),
+        };
+        const st = file.stat(io) catch |err| {
+            file.close(io);
+            return failMapped(request, arena, err);
+        };
+        if (st.size != offset) {
+            file.close(io);
+            return failOffset(request, arena, .conflict, "offset_mismatch", st.size);
+        }
+    }
+
+    var closed = false;
+    defer if (!closed) file.close(io);
+
+    var write_buf: [64 * 1024]u8 = undefined;
+    var fw = file.writer(io, &write_buf);
+    fw.seekTo(offset) catch |err| return failMapped(request, arena, err);
+
+    var head_buf: [16 * 1024]u8 = undefined;
+    const body_reader = request.readerExpectContinue(&head_buf) catch return fail(request, arena, .bad_request, "bad_body");
+
+    var chunk: [64 * 1024]u8 = undefined;
+    var written: u64 = offset;
+    while (true) {
+        const n = body_reader.readSliceShort(&chunk) catch |err| return failMapped(request, arena, err);
+        if (n == 0) break;
+        written += n;
+        if (written > total) return fail(request, arena, .payload_too_large, "upload_too_large");
+        fw.interface.writeAll(chunk[0..n]) catch |err| return failMapped(request, arena, err);
+    }
+    fw.interface.flush() catch |err| return failMapped(request, arena, err);
+    file.close(io);
+    closed = true;
+
+    if (written < total) {
+        const Payload = struct { ok: bool, done: bool, offset: u64 };
+        return respondJson(request, arena, .ok, Payload{ .ok = true, .done = false, .offset = written });
+    }
+
+    Dir.rename(.cwd(), temp, .cwd(), abs, io) catch |err| return failMapped(request, arena, err);
+    const Payload = struct { ok: bool, done: bool, path: []const u8, offset: u64 };
+    return respondJson(request, arena, .ok, Payload{ .ok = true, .done = true, .path = rel, .offset = total });
+}
+
+fn uploadStatus(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+        return fail(request, arena, .bad_request, "invalid_path");
+    const raw_id = util.queryParam(request.head.target, "id") orelse
+        return fail(request, arena, .bad_request, "invalid_id");
+    const id = validUploadId(raw_id) orelse return fail(request, arena, .bad_request, "invalid_id");
+    const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const temp = uploadTempPath(arena, abs, id) catch
+        return fail(request, arena, .internal_server_error, "out_of_memory");
+
+    const st = Dir.cwd().statFile(io, temp, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return failMapped(request, arena, err),
+    };
+    const Payload = struct { offset: u64 };
+    return respondJson(request, arena, .ok, Payload{ .offset = if (st) |x| x.size else 0 });
+}
+
+fn uploadCancel(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+        return fail(request, arena, .bad_request, "invalid_path");
+    const raw_id = util.queryParam(request.head.target, "id") orelse
+        return fail(request, arena, .bad_request, "invalid_id");
+    const id = validUploadId(raw_id) orelse return fail(request, arena, .bad_request, "invalid_id");
+    const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const temp = uploadTempPath(arena, abs, id) catch
+        return fail(request, arena, .internal_server_error, "out_of_memory");
+
+    Dir.cwd().deleteFile(io, temp) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return failMapped(request, arena, err),
+    };
+    const Payload = struct { ok: bool };
+    return respondJson(request, arena, .ok, Payload{ .ok = true });
+}
+
+fn validUploadId(raw: []const u8) ?[]const u8 {
+    if (raw.len < 8 or raw.len > 32) return null;
+    for (raw) |c| if (!std.ascii.isHex(c)) return null;
+    return raw;
+}
+
+fn uploadTempPath(alloc: Allocator, target_abs: []const u8, id: []const u8) ![]const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, target_abs, '/') orelse return error.InvalidPath;
+    return std.fmt.allocPrint(alloc, "{s}/.myty-upload-{s}", .{ target_abs[0..slash], id });
+}
+
+fn parseU64(text: []const u8) ?u64 {
+    return std.fmt.parseInt(u64, text, 10) catch null;
+}
+
+fn failOffset(request: *http.Server.Request, alloc: Allocator, status: http.Status, code: []const u8, offset: u64) !void {
+    const Payload = struct { @"error": []const u8, offset: u64 };
+    return respondJson(request, alloc, status, Payload{ .@"error" = code, .offset = offset });
+}
+
+fn archive(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+        return fail(request, arena, .bad_request, "invalid_path");
+    const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const st = Dir.cwd().statFile(io, abs, .{ .follow_symlinks = false }) catch |err|
+        return failMapped(request, arena, err);
+    if (st.kind != .directory) return fail(request, arena, .bad_request, "not_a_directory");
+
+    const base = basename(rel);
+    const root_name = if (base.len == 0) "root" else base;
+
+    var name_buf: [512]u8 = undefined;
+    const tar_name = std.fmt.bufPrint(&name_buf, "{s}.tar", .{root_name}) catch "archive.tar";
+    var disposition_buf: [1024]u8 = undefined;
+    const disposition = contentDisposition(&disposition_buf, tar_name);
+
+    var headers = [_]http.Header{
+        .{ .name = "content-type", .value = "application/x-tar" },
+        .{ .name = "content-disposition", .value = disposition },
+        .{ .name = "cache-control", .value = "no-store" },
+        .{ .name = "x-content-type-options", .value = "nosniff" },
+    };
+
+    var stream_buf: [64 * 1024]u8 = undefined;
+    var body = try request.respondStreaming(&stream_buf, .{
+        .respond_options = .{ .extra_headers = &headers },
+    });
+
+    var tw: std.tar.Writer = .{ .underlying_writer = &body.writer };
+    tw.setRoot(root_name) catch return error.WriteFailed;
+    try walkTar(io, arena, &tw, abs, "", 0);
+    tw.finishPedantically() catch return error.WriteFailed;
+    return body.end();
+}
+
+fn walkTar(io: Io, alloc: Allocator, tw: *std.tar.Writer, dir_abs: []const u8, prefix: []const u8, depth: u32) !void {
+    if (depth > 64) return;
+
+    var dir = Dir.cwd().openDir(io, dir_abs, .{ .iterate = true, .follow_symlinks = false }) catch return;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (it.next(io) catch return) |entry| {
+        const sub = if (prefix.len == 0)
+            try alloc.dupe(u8, entry.name)
+        else
+            try std.fmt.allocPrint(alloc, "{s}/{s}", .{ prefix, entry.name });
+
+        switch (entry.kind) {
+            .directory => {
+                tw.writeDir(sub, .{}) catch continue;
+                const child_abs = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_abs, entry.name });
+                walkTar(io, alloc, tw, child_abs, sub, depth + 1) catch {};
+            },
+            .file => {
+                var file = dir.openFile(io, entry.name, .{}) catch continue;
+                defer file.close(io);
+                const st = file.stat(io) catch continue;
+                var buf: [64 * 1024]u8 = undefined;
+                var fr = file.reader(io, &buf);
+                tw.writeFileStream(sub, st.size, &fr.interface, .{}) catch continue;
+            },
+            else => {},
+        }
+    }
 }
 
 fn download(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {

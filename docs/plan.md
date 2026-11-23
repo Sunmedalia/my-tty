@@ -90,6 +90,9 @@ Zig 单进程
   "shell": "/bin/bash",
   "password": "please-change-me",
   "session_ttl_days": 7,
+  "session_idle_hours": 24,
+  "max_connections": 64,
+  "tmux": true,
   "root": "/srv/work",
   "max_sessions": 16
 }
@@ -102,6 +105,9 @@ Zig 单进程
 | shell | `shell` | `MYTTY_SHELL` | `--shell` |
 | 登录密码 | `password` | `MYTTY_PASSWORD` | `--password` |
 | 会话有效期（天） | `session_ttl_days` | `MYTTY_SESSION_TTL_DAYS` | `--session-ttl-days` |
+| 空闲超时（小时） | `session_idle_hours` | `MYTTY_SESSION_IDLE_HOURS` | `--session-idle-hours` |
+| 最大连接数 | `max_connections` | `MYTTY_MAX_CONNECTIONS` | `--max-connections` |
+| tmux 持久会话 | `tmux` | — | `--no-tmux` |
 | 文件根 | `root` | `MYTTY_ROOT` | `--root` |
 | 会话上限 | `max_sessions` | `MYTTY_MAX_SESSIONS` | `--max-sessions` |
 
@@ -159,9 +165,11 @@ WebSocket 升级既接受会话 Cookie，也接受 `?ticket=`（一次性）。
 ### 5.4 安全边界
 
 - 只监听回环（默认）；所有功能都要求登录会话。
-- 密码定长时间比较；登录失败固定延迟 250ms。
+- 密码定长时间比较；登录失败固定延迟 250ms + 按 IP 失败封禁（5 次/10 分钟 → 5 分钟）。
 - 会话 Cookie：`HttpOnly; SameSite=Strict; Path=/`，反向代理为 HTTPS 时加 `Secure`。
-- WebSocket 票据 30 秒、一次性；注销立即失效。
+- 会话有空闲超时；后台每 5 分钟清理一次过期会话/票据。
+- WebSocket 票据 30 秒、一次性；带 Origin 时必须与 Host 一致；注销立即失效。
+- HTTP 阶段 30 秒读写超时；并发连接上限；SIGTERM/SIGINT 优雅退出并回收 PTY。
 - 文件 API 以启动时 `realpath(root)` 为唯一边界；每个目标是 `realPathFileAlloc`
   后再做前缀校验，符号链接无法逃逸。新建文件先校验父目录。
 - 文本读取/写入上限 1 MiB；上传上限 64 MiB，流式写临时文件后原子替换。
@@ -269,8 +277,14 @@ my-tty/
 ### P3 收尾
 
 - [x] DOM 渲染底部裁切：去掉自定义 lineHeight，fit 后按 pane 真实边界校验并收缩行列。
-- [x] TUI 图形完整性：内置 JetBrains Mono（OFL），并在创建 Terminal 前 await 字体加载，
-      方块/制表符填满单元格（DejaVu 会在 `█` 与竖线处留下 1–2px 缝隙）。
+- [x] TUI 图形完整性：内置 JetBrains Mono（OFL，子集化 woff2 ~40 KB），创建 Terminal
+      前 await 字体加载，方块/制表符填满单元格。
+- [x] 搜索（addon-search）、链接（addon-web-links）、字号调节、pane 最大化、可拖拽分栏。
+- [x] 移动端按键条、剪贴板兜底。
+- [x] tmux 持久会话：断线/刷新后按 `mytty-<hex>` reattach（`--no-tmux` 可关）。
+- [x] 上传进度/取消、4 MiB 分片与断点续传、目录 tar 下载、编辑器行号/Tab/离开提示。
+- [x] CI（格式/构建/单测/smoke/浏览器）与 `tests/browser/` 回归脚本。
+- [x] `--check-config`、`my-tty.example.json`、`scripts/build-release.sh`（strip）。
 - [ ] 复制/粘贴快捷键在 DOM 渲染下的手工验收（Chrome/Firefox）。
 - [ ] README 完整化；`docs/research.md` 归档。
 - [ ] 二进制体积与启动时间记录。

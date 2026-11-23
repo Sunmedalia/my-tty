@@ -26,6 +26,19 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     };
 
+    if (argsContain(args, "--check-config")) {
+        const fs = @import("fsapi.zig").Fs.init(init.io, init.gpa, cfg.root) catch |err| {
+            std.debug.print("配置检查失败: 无法打开 root={s}（{t}）\n", .{ cfg.root, err });
+            std.process.exit(1);
+        };
+        std.debug.print("配置检查通过: host={s} port={d} root={s} sessions={d}d/{d}h conns={d} tmux={s}\n", .{
+            cfg.host,                        cfg.port, fs.root, cfg.session_ttl_days, cfg.session_idle_hours, cfg.max_connections,
+            if (cfg.tmux) "auto" else "off",
+        });
+        init.gpa.free(fs.root);
+        return;
+    }
+
     if (cfg.password == null) {
         var raw: [12]u8 = undefined;
         init.io.random(&raw);
@@ -43,6 +56,11 @@ pub fn main(init: std.process.Init) !void {
     };
 }
 
+fn argsContain(args: []const [:0]const u8, needle: []const u8) bool {
+    for (args[1..]) |arg| if (std.mem.eql(u8, arg, needle)) return true;
+    return false;
+}
+
 fn describe(err: config.Config.ParseError) []const u8 {
     return switch (err) {
         error.UnknownArgument => "未知参数",
@@ -50,7 +68,8 @@ fn describe(err: config.Config.ParseError) []const u8 {
         error.InvalidPort => "端口或并发数不合法",
         error.InvalidHost => "监听地址必须是 IPv4 字面量",
         error.EmptyPassword => "密码不能为空",
-        error.InvalidSessionTtl => "登录有效期必须在 1–365 天之间",
+        error.InvalidSessionTtl => "登录有效期必须在 1–365 天，空闲超时不得超过 8760 小时",
+        error.InvalidMaxConnections => "最大连接数必须在 1–4096 之间",
         error.ConfigReadFailed => "配置文件读取失败",
         error.ConfigInvalid => "配置文件不是合法 JSON 或字段类型不对",
         else => "未知错误",
