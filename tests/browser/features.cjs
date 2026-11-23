@@ -70,6 +70,35 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
     "composed insertText is not dropped"
   );
 
+  // 移动端重复输入回归：keydown 已经发出字符后，浏览器又补发一次 composed
+  // insertText。不能再清 _keyDownSeen，否则 Z 会变成 ZZ（ls -> llss）。
+  await page.keyboard.type("printf 'READY2_%s\\n' MARK; read -r Y; echo YLEN=${#Y}; echo YVAL=$Y\r");
+  await page.waitForFunction(
+    () => document.querySelector(".xterm-rows").innerText.includes("READY2_MARK"),
+    null,
+    { timeout: 8000 }
+  );
+  await page.evaluate(() => document.querySelector(".xterm-helper-textarea").focus());
+  await page.keyboard.down("Z");
+  await page.evaluate(() => {
+    const ta = document.querySelector(".xterm-helper-textarea");
+    ta.focus();
+    const opts = { data: "Z", inputType: "insertText", composed: true, bubbles: true, cancelable: true };
+    ta.dispatchEvent(new InputEvent("beforeinput", opts));
+    ta.dispatchEvent(new InputEvent("input", opts));
+  });
+  await page.keyboard.up("Z");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(
+    () => document.querySelector(".xterm-rows").innerText.includes("YVAL=Z"),
+    null,
+    { timeout: 8000 }
+  );
+  assert(
+    (await page.locator(".xterm-rows").innerText()).includes("YLEN=1"),
+    "composed insertText after keydown must not double the character"
+  );
+
   await page.locator(".pane-term").click();
   await page.keyboard.type("printf 'FIND_%s\\nOTHER\\nFIND\\n' MARK\r");
   await page.waitForFunction(

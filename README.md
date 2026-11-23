@@ -117,7 +117,8 @@ HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 `+ 分屏` 最多 4 个：2 屏左右均分；3 屏左边一个占满整高、右边上下均分；
 4 屏 2×2。每个 pane 是独立的终端、WebSocket 和 PTY，关闭 pane 会回收对应 shell。
 分栏可以拖拽；pane 右上角可最大化；`Ctrl+Shift+F` 搜索，`Ctrl+Shift+±` 调整字号，
-`F3` 下一个匹配。移动端会显示 Esc/Tab/Ctrl/方向键/^C/^D/^L 按键条。
+`F3` 下一个匹配。移动端会显示 Esc/Tab/Ctrl/方向键/^C/^D/^L 按键条；
+触摸设备上文件行的下载/重命名/删除按钮常显，顶栏在窄屏下收紧并预留底部安全区。
 
 复制/粘贴是终端语义：
 
@@ -169,8 +170,12 @@ TLS 不属于本项目：请让进程只监听回环地址，把明文 HTTP/WS �
 
 前端对 xterm 6.0 做了一处输入修补：Safari 和部分输入法（如中文输入法的英文模式）
 会让字符的 `input` 事件早于它自己的 `keydown`，xterm 用 `_keyDownSeen` 去重时会把
-字符当成重复事件丢掉。我们在 `beforeinput` 阶段清掉这个标记，让 xterm 正常发送；
-正常按键已经被 xterm `preventDefault`，不会产生 `input` 事件，因此不会重复。
+字符当成重复事件丢掉；而移动端浏览器又会在 `keydown` 已经发出字符后补发一次
+composed `insertText`，无条件清标记会让字符变成两个（`ls` → `llss`）。
+
+现在的规则是只在 `keydown` 没有对应字符（229/Process、组合输入、带 Ctrl/Alt/Meta）
+时才清掉 `_keyDownSeen`；普通按键仍走 xterm 原来的去重逻辑。桌面 Chrome/Safari 的
+正常按键不会产生 `input` 事件，行为不变。
 
 `web/vendor/fonts/` 内置 JetBrains Mono v2.304（OFL 1.1）。DOM 渲染器只能靠
 字体绘制方框/方块字符，系统字体（如 DejaVu）会让 `█` 和边框出现缝隙；

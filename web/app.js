@@ -97,23 +97,77 @@
     term.loadAddon(new WebLinksAddon.WebLinksAddon());
     term.open(termEl);
 
-    // xterm 6.0 的去重条件：composed 的 insertText 只要内部的 _keyDownSeen 为真
-    // 就会被当成重复事件丢掉。Safari，以及部分输入法（例如中文输入法的英文模式）
-    // 会出现字符的 input 早于自己的 keydown，或 keydown 直接是 229，结果字符被吞。
-    // 在 beforeinput 阶段清掉标记，让 xterm 自己的 input 路径把它发出去；正常按键
-    // 已经被 xterm preventDefault，不会产生 input 事件，所以不会重复发送。
+    // xterm 6.0 用 _keyDownSeen 去重：composed 的 insertText 只要该标记为真
+    // 就会被忽略。Safari/输入法会出现 keydown 是 229/Process、字符只能靠随后的
+    // input 送达的情况；但移动端浏览器又会在 keydown 已经发出字符后，再派发一次
+    // composed insertText——无条件清标记会让同一个字符发两遍（ls → llss）。
+    //
+    // 所以只记录“这次 keydown 是否可能已经发出了这个字符”。只有 keydown 没有
+    // 对应字符（229/Process/组合输入/带 Ctrl/Alt/Meta）时，才清标记让 input 补发；
+    // 普通按键仍交给 xterm 原本的去重逻辑。桌面 Chrome/Safari 的正常按键不会
+    // 产生 input 事件，这段逻辑不会改变它们的行为。
     const helperTextarea = term.textarea;
     if (helperTextarea && term._core) {
+      let lastKeyChar = null;
+      let lastKeyAt = 0;
+
+      // 有些移动键盘的 keydown 给 key="Unidentified"，但 keyCode 仍是字母/
+      // 数字，xterm 会按 keyCode 正常发出；这里补出对应字符，避免误判成 IME。
+      const printableKey = (event) => {
+        if (event.key && event.key.length === 1) return event.key;
+        const code = event.keyCode;
+        if (code >= 65 && code <= 90) {
+          return String.fromCharCode(event.shiftKey ? code : code + 32);
+        }
+        if (code >= 48 && code <= 57) {
+          return event.shiftKey
+            ? ")!@#$%^&*("[code - 48]
+            : String.fromCharCode(code);
+        }
+        if (code === 32) return " ";
+        return null;
+      };
+
+      const trackKeyDown = (event) => {
+        if (event.target !== helperTextarea) return;
+        if (
+          event.isComposing ||
+          event.keyCode === 229 ||
+          event.ctrlKey ||
+          event.altKey ||
+          event.metaKey
+        ) {
+          lastKeyChar = null;
+          return;
+        }
+        lastKeyChar = printableKey(event);
+        lastKeyAt = performance.now();
+      };
+
       const letInputThrough = (event) => {
         if (event.target !== helperTextarea) return;
         if (!event.composed || !event.data) return;
         if (event.inputType !== "insertText" || event.isComposing) return;
+
+        const sameAsKeydown =
+          lastKeyChar !== null &&
+          event.data === lastKeyChar &&
+          performance.now() - lastKeyAt < 500;
+        lastKeyChar = null;
+
+        // keydown 已经把同一个字符发出去了；保持 _keyDownSeen，让 input 被忽略。
+        if (sameAsKeydown) return;
         term._core._keyDownSeen = false;
       };
-      // beforeinput 是最早的时机；input 的捕获阶段则保证在 xterm 自己的
-      // textarea 监听器之前执行，兼容不派发 beforeinput 的旧 WebKit。
-      helperTextarea.addEventListener("beforeinput", letInputThrough);
-      termEl.addEventListener("input", letInputThrough, true);
+
+      termEl.addEventListener("keydown", trackKeyDown, true);
+      // beforeinput 是最早的时机；不支持它的旧 WebKit 才退回 input 捕获阶段
+      // （input 在 xterm 自己的 textarea 监听器之前执行）。
+      if ("onbeforeinput" in helperTextarea) {
+        helperTextarea.addEventListener("beforeinput", letInputThrough);
+      } else {
+        termEl.addEventListener("input", letInputThrough, true);
+      }
     }
 
     const pane = {
