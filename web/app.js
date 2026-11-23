@@ -62,7 +62,6 @@
       fontFamily:
         'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
       fontSize: 14,
-      lineHeight: 1.15,
       scrollback: 5000,
       allowProposedApi: false,
       macOptionIsMeta: true,
@@ -72,7 +71,7 @@
     term.loadAddon(fit);
     term.open(termEl);
 
-    const pane = { el, term, fit, bar, status, dot, ws: null, alive: false, reconnect: null };
+    const pane = { el, termEl, term, fit, bar, status, dot, ws: null, alive: false, reconnect: null };
     panes.push(pane);
 
     term.attachCustomKeyEventHandler((event) => handleTermKey(event, pane));
@@ -225,6 +224,26 @@
     } catch (_) {
       return;
     }
+
+    // DOM renderer 的单元格高度会取整：fit() 偶尔会多算 1 行，导致最后一行
+    // 被容器裁掉。这里用真实布局尺寸校验一次，放不下就收缩。
+    const host = pane.term.element;
+    const screen = host && host.querySelector(".xterm-screen");
+    if (host && screen) {
+      // 裁切发生在 .pane-term（overflow:hidden）的边框盒，按它的尺寸判断。
+      const box = pane.termEl.getBoundingClientRect();
+      for (let i = 0; i < 4; i++) {
+        const sr = screen.getBoundingClientRect();
+        const tooWide = sr.right > box.right + 0.5;
+        const tooTall = sr.bottom > box.bottom + 0.5;
+        if (!tooWide && !tooTall) break;
+        const cols = tooWide ? Math.max(2, pane.term.cols - 1) : pane.term.cols;
+        const rows = tooTall ? Math.max(1, pane.term.rows - 1) : pane.term.rows;
+        if (cols === pane.term.cols && rows === pane.term.rows) break;
+        pane.term.resize(cols, rows);
+      }
+    }
+
     sendResize(pane);
   }
 
@@ -554,6 +573,9 @@
   ro.observe(workspace);
 
   window.addEventListener("resize", () => panes.forEach(fitPane));
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => panes.forEach(fitPane));
+  }
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) panes.forEach(fitPane);
   });
