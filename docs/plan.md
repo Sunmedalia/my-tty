@@ -92,7 +92,6 @@ Zig 单进程
   "session_ttl_days": 7,
   "session_idle_hours": 24,
   "max_connections": 64,
-  "tmux": true,
   "root": "/srv/work",
   "max_sessions": 16
 }
@@ -107,7 +106,6 @@ Zig 单进程
 | 会话有效期（天） | `session_ttl_days` | `MYTTY_SESSION_TTL_DAYS` | `--session-ttl-days` |
 | 空闲超时（小时） | `session_idle_hours` | `MYTTY_SESSION_IDLE_HOURS` | `--session-idle-hours` |
 | 最大连接数 | `max_connections` | `MYTTY_MAX_CONNECTIONS` | `--max-connections` |
-| tmux 持久会话 | `tmux` | — | `--no-tmux` |
 | 文件根 | `root` | `MYTTY_ROOT` | `--root` |
 | 会话上限 | `max_sessions` | `MYTTY_MAX_SESSIONS` | `--max-sessions` |
 
@@ -281,7 +279,6 @@ my-tty/
       前 await 字体加载，方块/制表符填满单元格。
 - [x] 搜索（addon-search）、链接（addon-web-links）、字号调节、pane 最大化、可拖拽分栏。
 - [x] 移动端按键条、剪贴板兜底。
-- [x] tmux 持久会话：断线/刷新后按 `mytty-<hex>` reattach（`--no-tmux` 可关）。
 - [x] 上传进度/取消、4 MiB 分片与断点续传、目录 tar 下载、编辑器行号/Tab/离开提示。
 - [x] CI（格式/构建/单测/smoke/浏览器）与 `tests/browser/` 回归脚本。
 - [x] `--check-config`、`my-tty.example.json`、`scripts/build-release.sh`（strip）。

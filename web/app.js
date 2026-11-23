@@ -58,7 +58,7 @@
 
   // ---------------------------------------------------------------- terminals
 
-  function createPane(initialSession = "") {
+  function createPane() {
     if (panes.length >= MAX_PANES) return;
 
     const el = document.createElement("section");
@@ -105,7 +105,6 @@
       bar,
       status,
       dot,
-      sessionId: initialSession,
       ws: null,
       alive: false,
       reconnect: null,
@@ -135,15 +134,6 @@
     focusPane(pane);
   }
 
-  function saveSessions() {
-    try {
-      sessionStorage.setItem(
-        "myttty.sessions",
-        JSON.stringify(panes.map((p) => p.sessionId || ""))
-      );
-    } catch (_) {}
-  }
-
   function focusPane(pane) {
     activePane = pane;
     for (const p of panes) p.el.classList.toggle("active", p === pane);
@@ -166,7 +156,6 @@
       activePane = panes[Math.min(idx, panes.length - 1)] || null;
       if (activePane) focusPane(activePane);
     }
-    saveSessions();
     if (panes.length === 0) {
       if (respawn && started) createPane();
     } else {
@@ -194,10 +183,8 @@
     }
 
     let ws;
-    let url = `${wsBase}?ticket=${encodeURIComponent(ticket)}`;
-    if (pane.sessionId) url += `&session=${encodeURIComponent(pane.sessionId)}`;
     try {
-      ws = new WebSocket(url);
+      ws = new WebSocket(`${wsBase}?ticket=${encodeURIComponent(ticket)}`);
     } catch (err) {
       setPaneStatus(pane, "连接失败", "error");
       return;
@@ -223,10 +210,7 @@
       } catch (_) {
         return;
       }
-      if (msg.t === "ready" && msg.session) {
-        pane.sessionId = msg.session;
-        saveSessions();
-      } else if (msg.t === "exit") {
+      if (msg.t === "exit") {
         setPaneStatus(pane, "Shell 已退出（点击重连）", "error");
       } else if (msg.t === "error") {
         setPaneStatus(pane, "会话异常（点击重连）", "error");
@@ -1187,27 +1171,13 @@
       await document.fonts.load('14px "JetBrains Mono"');
       await document.fonts.ready;
     } catch (_) {}
-    if (panes.length === 0) {
-      let restored = false;
-      try {
-        const saved = JSON.parse(sessionStorage.getItem("myttty.sessions") || "null");
-        if (Array.isArray(saved) && saved.length > 0) {
-          for (const sid of saved.slice(0, MAX_PANES)) createPane(sid || "");
-          restored = true;
-        }
-      } catch (_) {}
-      if (!restored) createPane();
-    } else {
-      layout();
-    }
+    if (panes.length === 0) createPane();
+    else layout();
     refreshFiles();
   }
 
   function stopApp() {
     started = false;
-    try {
-      sessionStorage.removeItem("myttty.sessions");
-    } catch (_) {}
     for (const pane of [...panes]) removePane(pane, false);
     panes.length = 0;
   }

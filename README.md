@@ -10,7 +10,6 @@
 | 登录认证（弹窗登录 / 7 天会话 / 空闲超时 / 注销） | ✅ |
 | 登录限流、连接上限、Origin 校验、优雅退出 | ✅ |
 | WebSocket ⇄ Linux PTY，真实 shell | ✅ |
-| tmux 持久会话（断线/刷新可 reattach） | ✅ |
 | 分屏 1–4、可拖拽分栏、最大化、字号调节 | ✅ |
 | 终端搜索 / 链接 / 移动端按键条 | ✅ |
 | 文件管理、文本编辑、上传（分片续传）/ 下载 / 目录 tar | ✅ |
@@ -47,7 +46,6 @@ zig test src/tests.zig
   "session_ttl_days": 7,
   "session_idle_hours": 24,
   "max_connections": 64,
-  "tmux": true,
   "root": "/srv/work",
   "max_sessions": 16
 }
@@ -88,12 +86,6 @@ HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 4 屏 2×2。每个 pane 是独立的终端、WebSocket 和 PTY，关闭 pane 会回收对应 shell。
 分栏可以拖拽；pane 右上角可最大化；`Ctrl+Shift+F` 搜索，`Ctrl+Shift+±` 调整字号，
 `F3` 下一个匹配。移动端会显示 Esc/Tab/Ctrl/方向键/^C/^D/^L 按键条。
-
-启用 tmux 时（默认，检测到 `/usr/bin/tmux` 即生效），每个 pane 的 shell 跑在
-`mytty-<16 hex>` 会话里，断线或刷新后会用同一个会话名重新 attach，环境变量与
-正在运行的程序都会保留；`--shell` 指定的 shell 仍会作为 tmux 内的登录 shell 启动。
-`--no-tmux` 可关闭。关掉 pane 只会 detach，tmux 会话仍在后台，可用
-`tmux ls` / `tmux kill-session -t mytty-<id>` 管理。
 
 ## 安全边界
 

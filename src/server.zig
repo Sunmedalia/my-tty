@@ -58,8 +58,6 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
 
     var auth_state = auth.Auth.init(io, cfg.password orelse unreachable, cfg.session_ttl_days, cfg.session_idle_hours);
     var limiter: LoginLimiter = .{ .io = io };
-    const tmux_path = if (cfg.tmux) findExecutable(io, gpa, cfg.environ, "tmux") else null;
-    defer if (tmux_path) |p| gpa.free(p);
 
     const addr = try net.IpAddress.parseIp4(cfg.host, cfg.port);
     var listener = try addr.listen(io, .{ .reuse_address = true });
@@ -72,15 +70,14 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     const maint = std.Thread.spawn(.{}, maintenance, .{ io, &auth_state }) catch null;
     _ = maint;
 
-    std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  root={s}  会话={d}天/{d}h  连接≤{d}  持久会话={s}\n", .{
+    std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  root={s}  会话={d}天/{d}h  连接≤{d}\n", .{
         cfg.host,
         cfg.port,
-        if (tmux_path) |p| p else cfg.shell,
+        cfg.shell,
         fs.root,
         cfg.session_ttl_days,
         cfg.session_idle_hours,
         cfg.max_connections,
-        if (tmux_path != null) "tmux" else "off",
     });
 
     while (true) {
@@ -106,7 +103,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
         setSocketTimeout(stream.socket.handle, posix.SO.SNDTIMEO, io_timeout_seconds);
 
         const thread = std.Thread.spawn(.{}, connectionMain, .{
-            io, gpa, stream, cfg, &fs, &auth_state, &limiter, tmux_path,
+            io, gpa, stream, cfg, &fs, &auth_state, &limiter,
         }) catch {
             _ = active_connections.fetchSub(1, .acq_rel);
             stream.close(io);
@@ -135,7 +132,6 @@ fn connectionMain(
     fs: *const fsapi.Fs,
     auth_state: *auth.Auth,
     limiter: *LoginLimiter,
-    tmux_path: ?[]const u8,
 ) void {
     defer {
         _ = active_connections.fetchSub(1, .acq_rel);
@@ -170,9 +166,8 @@ fn connectionMain(
                 }
                 // 终端可能空闲很久，升级后取消读超时。
                 setSocketTimeout(stream.socket.handle, posix.SO.RCVTIMEO, 0);
-                const reconnect = util.queryParam(request.head.target, "session");
                 var ws = request.respondWebSocket(.{ .key = key }) catch return;
-                session.run(io, gpa, &ws, &stream, cfg, tmux_path, reconnect) catch |err| {
+                session.run(io, gpa, &ws, &stream, cfg) catch |err| {
                     std.debug.print("会话结束: {t}\n", .{err});
                     ws.writeMessage("{\"t\":\"error\"}", .text) catch {};
                 };
@@ -517,28 +512,4 @@ fn setSocketTimeout(fd: posix.fd_t, opt: u32, seconds: isize) void {
     if (seconds < 0) return;
     const tv: posix.timeval = .{ .sec = seconds, .usec = 0 };
     posix.setsockopt(fd, posix.SOL.SOCKET, opt, std.mem.asBytes(&tv)) catch {};
-}
-
-/// 在 PATH 里找可执行文件；只用于可选的 tmux。
-fn findExecutable(io: Io, alloc: Allocator, environ: std.process.Environ, name: []const u8) ?[]const u8 {
-    const path_env = blk: {
-        for (environ.block.view().slice) |entry| {
-            const text = std.mem.span(entry);
-            if (std.mem.startsWith(u8, text, "PATH=")) break :blk text["PATH=".len..];
-        }
-        return null;
-    };
-
-    var it = std.mem.splitScalar(u8, path_env, ':');
-    while (it.next()) |dir| {
-        if (dir.len == 0) continue;
-        const full = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name }) catch return null;
-        const ok = blk: {
-            std.Io.Dir.cwd().access(io, full, .{}) catch break :blk false;
-            break :blk true;
-        };
-        if (ok) return full;
-        alloc.free(full);
-    }
-    return null;
 }

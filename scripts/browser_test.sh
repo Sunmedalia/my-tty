@@ -15,11 +15,6 @@ cleanup() {
     wait "$PID" 2>/dev/null || true
   fi
   rm -rf "$ROOT" "$LOG"
-  if command -v tmux >/dev/null 2>&1; then
-    tmux list-sessions -F '#{session_name}' 2>/dev/null \
-      | grep -E '^mytty-' \
-      | while read -r s; do tmux kill-session -t "$s" 2>/dev/null || true; done
-  fi
 }
 trap cleanup EXIT
 

@@ -6,7 +6,6 @@
   "session_ttl_days": 7,
   "session_idle_hours": 24,
   "max_connections": 64,
-  "tmux": true,
   "root": "/srv/work",
   "max_sessions": 16
 }

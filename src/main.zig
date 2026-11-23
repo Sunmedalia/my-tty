@@ -31,9 +31,8 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("配置检查失败: 无法打开 root={s}（{t}）\n", .{ cfg.root, err });
             std.process.exit(1);
         };
-        std.debug.print("配置检查通过: host={s} port={d} root={s} sessions={d}d/{d}h conns={d} tmux={s}\n", .{
-            cfg.host,                        cfg.port, fs.root, cfg.session_ttl_days, cfg.session_idle_hours, cfg.max_connections,
-            if (cfg.tmux) "auto" else "off",
+        std.debug.print("配置检查通过: host={s} port={d} root={s} sessions={d}d/{d}h conns={d}\n", .{
+            cfg.host, cfg.port, fs.root, cfg.session_ttl_days, cfg.session_idle_hours, cfg.max_connections,
         });
         init.gpa.free(fs.root);
         return;
