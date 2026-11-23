@@ -546,3 +546,8 @@ button.icon {
   font-size: 11px;
   text-align: center;
 }
+
+#files.drop {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}

@@ -11,6 +11,8 @@ BIN="./zig-out/bin/my-tty"
 ROOT="$(mktemp -d)"
 LOG="$(mktemp)"
 COOKIE_JAR="$(mktemp)"
+UPLOAD_SRC="$(mktemp)"
+UPLOAD_DST="$(mktemp)"
 PID=""
 BASE="http://127.0.0.1:$PORT"
 API="$BASE/api/fs"
@@ -20,7 +22,7 @@ cleanup() {
     kill "$PID" 2>/dev/null || true
     wait "$PID" 2>/dev/null || true
   fi
-  rm -rf "$ROOT" "$LOG" "$COOKIE_JAR"
+  rm -rf "$ROOT" "$LOG" "$COOKIE_JAR" "$UPLOAD_SRC" "$UPLOAD_DST"
 }
 trap cleanup EXIT
 
@@ -45,7 +47,7 @@ curl -fsSI "$BASE/" | grep -qi 'x-content-type-options: nosniff'
 pass headers
 
 echo "== auth =="
-for path in "/api/fs/list?path=" "/api/auth/status" "/api/auth/ticket" "/api/auth/logout"; do
+for path in "/api/fs/list?path=" "/api/fs/download?path=x" "/api/fs/upload?path=x" "/api/auth/status" "/api/auth/ticket" "/api/auth/logout"; do
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X GET "$BASE$path")
   [ "$code" = "401" ]
 done
@@ -82,6 +84,17 @@ pass "traversal blocked"
 
 curl -fsS -X DELETE -b "$COOKIE_JAR" "$API/delete?path=a" | grep -q '"ok":true'
 pass delete
+
+printf 'UPLOAD_CONTENT_123' > "$UPLOAD_SRC"
+curl -fsS -X PUT -b "$COOKIE_JAR" --data-binary @"$UPLOAD_SRC" "$API/upload?path=up.bin" | grep -q '"ok":true'
+pass upload
+curl -fsS -b "$COOKIE_JAR" "$API/download?path=up.bin" -o "$UPLOAD_DST"
+cmp -s "$UPLOAD_SRC" "$UPLOAD_DST"
+pass "download round-trip"
+curl -sS -D - -o /dev/null -b "$COOKIE_JAR" "$API/download?path=up.bin" | grep -qi 'content-disposition: attachment'
+pass "download headers"
+curl -fsS -X DELETE -b "$COOKIE_JAR" "$API/delete?path=up.bin" | grep -q '"ok":true'
+pass "cleanup upload"
 
 echo "== websocket + pty =="
 node scripts/ws_test.mjs "$BASE" "$PASSWORD" "MYTTY_RESULT_OK" "Linux" "/dev/pts/"

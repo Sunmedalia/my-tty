@@ -15,6 +15,7 @@ const util = @import("util.zig");
 
 pub const max_read: usize = 1024 * 1024;
 pub const max_write: usize = 1024 * 1024;
+pub const max_upload: usize = 64 * 1024 * 1024;
 
 pub const Fs = struct {
     /// 规范化后的绝对路径，不以 `/` 结尾（根目录 `/` 除外）。
@@ -63,6 +64,14 @@ pub fn handle(io: Io, gpa: Allocator, fs: *const Fs, request: *http.Server.Reque
     if (std.mem.eql(u8, path, "/api/fs/delete")) {
         if (request.head.method != .DELETE) return fail(request, arena, .method_not_allowed, "method_not_allowed");
         return delete(io, arena, fs, request);
+    }
+    if (std.mem.eql(u8, path, "/api/fs/upload")) {
+        if (request.head.method != .PUT) return fail(request, arena, .method_not_allowed, "method_not_allowed");
+        return upload(io, arena, fs, request);
+    }
+    if (std.mem.eql(u8, path, "/api/fs/download")) {
+        if (request.head.method != .GET) return fail(request, arena, .method_not_allowed, "method_not_allowed");
+        return download(io, arena, fs, request);
     }
     return fail(request, arena, .not_found, "not_found");
 }
@@ -189,6 +198,105 @@ fn delete(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
     }
     const Payload = struct { ok: bool };
     return respondJson(request, arena, .ok, Payload{ .ok = true });
+}
+
+fn upload(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+        return fail(request, arena, .bad_request, "invalid_path");
+    if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
+
+    if (request.head.content_length) |len| {
+        if (len > max_upload) return fail(request, arena, .payload_too_large, "upload_too_large");
+    }
+
+    const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+
+    var atomic = Dir.cwd().createFileAtomic(io, abs, .{ .replace = true }) catch |err|
+        return failMapped(request, arena, err);
+    defer atomic.deinit(io);
+
+    var head_buf: [16 * 1024]u8 = undefined;
+    const body_reader = request.readerExpectNone(&head_buf);
+
+    var chunk: [64 * 1024]u8 = undefined;
+    var total: u64 = 0;
+    while (true) {
+        const n = body_reader.readSliceShort(&chunk) catch |err| return failMapped(request, arena, err);
+        if (n == 0) break;
+        total += n;
+        if (total > max_upload) return fail(request, arena, .payload_too_large, "upload_too_large");
+        atomic.file.writeStreamingAll(io, chunk[0..n]) catch |err| return failMapped(request, arena, err);
+    }
+
+    atomic.replace(io) catch |err| return failMapped(request, arena, err);
+
+    const Payload = struct { ok: bool, path: []const u8, size: u64 };
+    return respondJson(request, arena, .ok, Payload{ .ok = true, .path = rel, .size = total });
+}
+
+fn download(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+        return fail(request, arena, .bad_request, "invalid_path");
+    if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
+
+    const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const st = Dir.cwd().statFile(io, abs, .{ .follow_symlinks = false }) catch |err|
+        return failMapped(request, arena, err);
+    if (st.kind != .file) return fail(request, arena, .bad_request, "not_a_file");
+
+    var file = Dir.cwd().openFile(io, abs, .{ .mode = .read_only }) catch |err|
+        return failMapped(request, arena, err);
+    defer file.close(io);
+
+    const name = basename(rel);
+    var disposition_buf: [1024]u8 = undefined;
+    const disposition = contentDisposition(&disposition_buf, name);
+
+    var headers = [_]http.Header{
+        .{ .name = "content-type", .value = "application/octet-stream" },
+        .{ .name = "content-disposition", .value = disposition },
+        .{ .name = "cache-control", .value = "no-store" },
+        .{ .name = "x-content-type-options", .value = "nosniff" },
+    };
+
+    var stream_buf: [64 * 1024]u8 = undefined;
+    var body = try request.respondStreaming(&stream_buf, .{
+        .content_length = st.size,
+        .respond_options = .{ .extra_headers = &headers },
+    });
+
+    var file_buf: [64 * 1024]u8 = undefined;
+    var file_reader = file.reader(io, &file_buf);
+    _ = file_reader.interface.streamRemaining(&body.writer) catch |err| return err;
+    return body.end();
+}
+
+fn basename(path: []const u8) []const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return path[slash + 1 ..];
+}
+
+fn isUrlSafe(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~';
+}
+
+/// `attachment` + ASCII 回退名 + RFC 5987 的 UTF-8 文件名。
+fn contentDisposition(buf: []u8, name: []const u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeAll("attachment; filename=\"") catch return "attachment";
+    for (name) |c| {
+        const safe = c >= 0x20 and c < 0x7f and c != '"' and c != '\\';
+        w.writeByte(if (safe) c else '_') catch return "attachment";
+    }
+    w.writeAll("\"; filename*=UTF-8''") catch return "attachment";
+    for (name) |c| {
+        if (isUrlSafe(c)) {
+            w.writeByte(c) catch return "attachment";
+        } else {
+            w.print("%{X:0>2}", .{c}) catch return "attachment";
+        }
+    }
+    return w.buffered();
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +441,21 @@ test "normalized rejects traversal and absolute paths" {
     try std.testing.expectError(error.InvalidPath, normalized(a, "../etc"));
     try std.testing.expectError(error.InvalidPath, normalized(a, "a/../../b"));
     try std.testing.expectError(error.InvalidPath, normalized(a, "/etc/passwd"));
+}
+
+test "content disposition encoding" {
+    var buf: [128]u8 = undefined;
+    const plain = contentDisposition(&buf, "a.txt");
+    try std.testing.expect(std.mem.indexOf(u8, plain, "filename=\"a.txt\"") != null);
+
+    var buf2: [256]u8 = undefined;
+    const cjk = contentDisposition(&buf2, "\u{4e2d}\u{6587}.txt");
+    try std.testing.expect(std.mem.indexOf(u8, cjk, "filename*=UTF-8''%E4%B8%AD%E6%96%87.txt") != null);
+}
+
+test "basename" {
+    try std.testing.expectEqualStrings("b.txt", basename("a/b.txt"));
+    try std.testing.expectEqualStrings("a.txt", basename("a.txt"));
 }
 
 test "inside boundary" {

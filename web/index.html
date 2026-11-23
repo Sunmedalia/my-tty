@@ -26,11 +26,13 @@
             <div id="crumb"></div>
             <span class="spacer"></span>
             <button id="files-refresh" class="icon" type="button" title="刷新">⟳</button>
+            <button id="files-upload" class="icon" type="button" title="上传文件（也可直接拖入）">⇪</button>
             <button id="files-new-file" class="icon" type="button" title="新建文件">＋</button>
             <button id="files-new-dir" class="icon" type="button" title="新建目录">▣</button>
           </div>
           <ul id="file-list"></ul>
           <p id="notice"></p>
+          <input id="upload-input" type="file" multiple hidden />
         </aside>
 
         <main id="workspace" data-count="0"></main>

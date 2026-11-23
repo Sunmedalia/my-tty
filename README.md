@@ -11,7 +11,7 @@
 | HTTP 静态资源（内嵌） | ✅ |
 | WebSocket ⇄ Linux PTY，真实 shell | ✅ |
 | 配置文件 / 环境变量 / 命令行三层配置 | ✅ |
-| 文件管理 + 文本编辑 | ✅ |
+| 文件管理 + 文本编辑 + 上传/下载 | ✅ |
 | 分屏 1–4 终端（3 屏左一整高） | ✅ |
 
 ## 构建与运行
@@ -65,9 +65,11 @@ zig test src/tests.zig
 ## 文件管理与编辑
 
 左侧“文件”面板以 `--root`（默认当前目录）为边界，支持列目录、新建文件/目录、
-重命名、递归删除，以及纯文本编辑（≤1 MiB，`Ctrl+S` 保存）。
+重命名、递归删除、上传/下载，以及纯文本编辑（≤1 MiB，`Ctrl+S` 保存）。
+上传可以点工具栏的 ⇪，也可以把文件直接拖进面板；单个文件上限 64 MiB。
+下载走流式响应，带 `Content-Disposition: attachment`，不占内存。
 路径参数一律相对 root，服务端用 realpath 前缀校验，`..` 和符号链接都无法越界。
-HTTP API：`GET /api/fs/list|read`、`PUT /api/fs/write`、
+HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 `POST /api/fs/mkdir|rename`、`DELETE /api/fs/delete`。
 
 ## 分屏

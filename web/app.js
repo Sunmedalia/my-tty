@@ -8,6 +8,8 @@
   const filesBtn = document.getElementById("toggle-files");
   const filesEl = document.getElementById("files");
   const crumbEl = document.getElementById("crumb");
+  const uploadBtn = document.getElementById("files-upload");
+  const uploadInput = document.getElementById("upload-input");
   const fileList = document.getElementById("file-list");
   const noticeEl = document.getElementById("notice");
   const statusEl = document.getElementById("status");
@@ -416,6 +418,13 @@
       const actions = document.createElement("span");
       actions.className = "actions";
 
+      if (entry.kind === "file") {
+        const path = joinPath(currentDir, entry.name);
+        actions.appendChild(
+          smallButton("⤓", "下载", () => downloadFile(path, entry.name))
+        );
+      }
+
       const renameBtn = smallButton("✎", "重命名", async () => {
         const next = prompt("新名字", entry.name);
         if (!next || next === entry.name) return;
@@ -464,6 +473,56 @@
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
     return `${(n / 1024 / 1024).toFixed(1)} MiB`;
+  }
+
+  function downloadFile(path, name) {
+    const a = document.createElement("a");
+    a.href = `/api/fs/download?path=${encodeURIComponent(path)}`;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  const upload_limit = 64 * 1024 * 1024;
+
+  async function uploadFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+
+    let done = 0;
+    let failed = 0;
+    for (const file of files) {
+      if (file.size > upload_limit) {
+        failed++;
+        notice(`${file.name} 超过 64 MiB 上限`, true);
+        continue;
+      }
+      notice(`上传中 ${done + 1}/${files.length}：${file.name}`);
+      try {
+        const res = await fetch(
+          `/api/fs/upload?path=${encodeURIComponent(joinPath(currentDir, file.name))}`,
+          { method: "PUT", body: file }
+        );
+        if (res.status === 401) {
+          showLogin("登录已失效，请重新登录");
+          return;
+        }
+        let data = {};
+        try {
+          data = await res.json();
+        } catch (_) {}
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        done++;
+      } catch (err) {
+        failed++;
+        notice(`上传 ${file.name} 失败: ${err.message}`, true);
+      }
+    }
+
+    if (failed === 0) notice(`已上传 ${done} 个文件`);
+    else if (done > 0) notice(`上传完成 ${done} 个，失败 ${failed} 个`, true);
+    refreshFiles();
   }
 
   async function newFile() {
@@ -560,6 +619,22 @@
   document.getElementById("files-refresh").addEventListener("click", refreshFiles);
   document.getElementById("files-new-file").addEventListener("click", newFile);
   document.getElementById("files-new-dir").addEventListener("click", newDir);
+
+  uploadBtn.addEventListener("click", () => uploadInput.click());
+  uploadInput.addEventListener("change", () => {
+    uploadFiles(uploadInput.files);
+    uploadInput.value = "";
+  });
+  filesEl.addEventListener("dragover", (ev) => {
+    ev.preventDefault();
+    filesEl.classList.add("drop");
+  });
+  filesEl.addEventListener("dragleave", () => filesEl.classList.remove("drop"));
+  filesEl.addEventListener("drop", (ev) => {
+    ev.preventDefault();
+    filesEl.classList.remove("drop");
+    if (ev.dataTransfer && ev.dataTransfer.files.length) uploadFiles(ev.dataTransfer.files);
+  });
 
   let resizeQueued = false;
   const ro = new ResizeObserver(() => {

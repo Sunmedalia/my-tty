@@ -136,6 +136,8 @@ Zig 单进程
 | POST | `/api/fs/mkdir?path=` | 递归建目录 | `{"ok":true}` |
 | POST | `/api/fs/rename?from=&to=` | 同 root 内重命名/移动 | `{"ok":true}` |
 | DELETE | `/api/fs/delete?path=` | 文件或目录（递归） | `{"ok":true}` |
+| PUT | `/api/fs/upload?path=` | 上传（原始 body，≤64 MiB，原子替换） | `{"ok":true,"size"}` |
+| GET | `/api/fs/download?path=` | 流式下载（`attachment`） | 文件字节 |
 
 错误统一 `{"error":"code"}` + 恰当 HTTP 状态：`400`（参数/路径非法）、
 `401`（未登录）、`403`（越出 root）、`404`、`409`、`413`（过大）、`500`。
@@ -162,7 +164,8 @@ WebSocket 升级既接受会话 Cookie，也接受 `?ticket=`（一次性）。
 - WebSocket 票据 30 秒、一次性；注销立即失效。
 - 文件 API 以启动时 `realpath(root)` 为唯一边界；每个目标是 `realPathFileAlloc`
   后再做前缀校验，符号链接无法逃逸。新建文件先校验父目录。
-- 读取上限 1 MiB；拒绝 NUL（二进制）；写请求体上限 1 MiB。
+- 文本读取/写入上限 1 MiB；上传上限 64 MiB，流式写临时文件后原子替换。
+- 下载流式转发，不整文件读入内存。
 - 分屏上限 4；会话上限 `max_sessions`；每连接独立线程，避免互相阻塞。
 
 ---
@@ -253,7 +256,7 @@ my-tty/
 ### P1 文件管理与编辑（已完成）
 
 - [x] `fsapi.zig` 六个端点 + root sandbox + 单元测试（路径归一化、边界判断）。
-- [x] 前端抽屉、目录导航、重命名/删除/新建、编辑器、`Ctrl+S` 保存。
+- [x] 前端抽屉、目录导航、重命名/删除/新建、上传（含拖拽）/下载、编辑器、`Ctrl+S` 保存。
 - [x] `scripts/smoke.sh` 覆盖：list/write/read/mkdir/rename/delete + `../` 越界拦截。
 - [x] 文件 API 的单元测试跑在 `zig test src/tests.zig` 里（不放 build step）。
 
