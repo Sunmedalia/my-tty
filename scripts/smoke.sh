@@ -5,9 +5,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PORT="${PORT:-17387}"
-TOKEN="smoke-$(date +%s)"
+PASSWORD="smoke-pass-$(date +%s)"
 BIN="./zig-out/bin/my-tty"
 ROOT="$(mktemp -d)"
+COOKIE_JAR="$(mktemp)"
 LOG="$(mktemp)"
 PID=""
 
@@ -16,13 +17,13 @@ cleanup() {
     kill "$PID" 2>/dev/null || true
     wait "$PID" 2>/dev/null || true
   fi
-  rm -rf "$ROOT" "$LOG"
+  rm -rf "$ROOT" "$LOG" "$COOKIE_JAR"
 }
 trap cleanup EXIT
 
 zig build
 
-"$BIN" --host 127.0.0.1 --port "$PORT" --token "$TOKEN" --root "$ROOT" >"$LOG" 2>&1 &
+"$BIN" --host 127.0.0.1 --port "$PORT" --password "$PASSWORD" --root "$ROOT" >"$LOG" 2>&1 &
 PID=$!
 
 for _ in $(seq 1 50); do
@@ -42,20 +43,34 @@ curl -fsS "http://127.0.0.1:$PORT/vendor/xterm/xterm.js" -o /dev/null \
 echo "== security headers =="
 curl -fsSI "http://127.0.0.1:$PORT/" | grep -qi 'x-content-type-options: nosniff' \
   && echo "headers: PASS"
+echo "== auth =="
+code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/fs/list?path=")
+[ "$code" = "401" ] && echo "unauthenticated blocked: PASS"
+curl -fsS -c "$COOKIE_JAR" -H 'content-type: application/json' \
+  -d "{\"password\":\"$PASSWORD\"}" "http://127.0.0.1:$PORT/api/auth/login" | grep -q '"ok":true' \
+  && echo "login: PASS"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -c /dev/null -H 'content-type: application/json' \
+  -d '{"password":"wrong"}' "http://127.0.0.1:$PORT/api/auth/login")
+[ "$code" = "401" ] && echo "wrong password rejected: PASS"
+
 echo "== fs api =="
-H="X-MyTTY-Token: $TOKEN"
 API="http://127.0.0.1:$PORT/api/fs"
-curl -fsS -H "$H" "$API/list?path=" | grep -q '"entries"' && echo "list: PASS"
-curl -fsS -X PUT -H "$H" --data-binary 'smoke content' "$API/write?path=note.txt" | grep -q '"ok":true'   && echo "write: PASS"
-curl -fsS -H "$H" "$API/read?path=note.txt" | grep -q 'smoke content' && echo "read: PASS"
-curl -fsS -X POST -H "$H" "$API/mkdir?path=a/b" | grep -q '"ok":true' && echo "mkdir: PASS"
-curl -fsS -X POST -H "$H" "$API/rename?from=note.txt&to=a/note.txt" | grep -q '"ok":true'   && echo "rename: PASS"
-code=$(curl -sS -o /dev/null -w '%{http_code}' -H "$H" "$API/read?path=../etc/passwd")
+curl -fsS -b "$COOKIE_JAR" "$API/list?path=" | grep -q '"entries"' && echo "list: PASS"
+curl -fsS -X PUT -b "$COOKIE_JAR" --data-binary 'smoke content' "$API/write?path=note.txt" | grep -q '"ok":true'   && echo "write: PASS"
+curl -fsS -b "$COOKIE_JAR" "$API/read?path=note.txt" | grep -q 'smoke content' && echo "read: PASS"
+curl -fsS -X POST -b "$COOKIE_JAR" "$API/mkdir?path=a/b" | grep -q '"ok":true' && echo "mkdir: PASS"
+curl -fsS -X POST -b "$COOKIE_JAR" "$API/rename?from=note.txt&to=a/note.txt" | grep -q '"ok":true'   && echo "rename: PASS"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$API/read?path=../etc/passwd")
 [ "$code" = "400" ] && echo "traversal blocked: PASS"
-curl -fsS -X DELETE -H "$H" "$API/delete?path=a" | grep -q '"ok":true' && echo "delete: PASS"
+curl -fsS -X DELETE -b "$COOKIE_JAR" "$API/delete?path=a" | grep -q '"ok":true' && echo "delete: PASS"
 
 echo "== websocket + pty =="
-node scripts/ws_test.mjs "ws://127.0.0.1:$PORT/ws?token=$TOKEN" "MYTTY_RESULT_OK" "Linux" "/dev/pts/"
+node scripts/ws_test.mjs "http://127.0.0.1:$PORT" "$PASSWORD" "MYTTY_RESULT_OK" "Linux" "/dev/pts/"
+
+echo "== logout =="
+curl -fsS -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "http://127.0.0.1:$PORT/api/auth/logout" >/dev/null
+code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$API/list?path=")
+[ "$code" = "401" ] && echo "logout invalidates session: PASS"
 
 echo
 echo "全部通过（服务端日志见下方）"

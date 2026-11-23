@@ -16,8 +16,10 @@ pub const Config = struct {
     port: u16 = 7387,
     /// 登录 shell 的绝对路径。
     shell: []const u8 = "/bin/bash",
-    /// 非空时，所有请求都必须带 token。
-    token: ?[]const u8 = null,
+    /// 登录密码。未配置时由 main 生成随机密码并打印到终端。
+    password: ?[]const u8 = null,
+    /// 登录会话有效期（天）。
+    session_ttl_days: u32 = 7,
     /// 同时存在的终端会话上限，防止一次误操作 fork 出几百个 shell。
     max_sessions: u32 = 16,
     /// 文件管理/编辑的可访问根目录；所有路径都被限制在它下面。
@@ -30,8 +32,8 @@ pub const Config = struct {
         MissingValue,
         InvalidPort,
         InvalidHost,
-        EmptyToken,
-        TokenRequired,
+        EmptyPassword,
+        InvalidSessionTtl,
         ConfigReadFailed,
         ConfigInvalid,
         OutOfMemory,
@@ -45,7 +47,8 @@ pub const Config = struct {
         \\  --host <ipv4>        监听地址（默认 127.0.0.1）
         \\  --port <1-65535>     监听端口（默认 7387）
         \\  --shell <path>       登录 shell（默认 $SHELL 或 /bin/bash）
-        \\  --token <secret>     访问令牌；监听非回环地址时必填
+        \\  --password <secret>  登录密码；不填则每次启动随机生成
+        \\  --session-ttl-days <n>  登录有效期，默认 7 天
         \\  --root <dir>         文件管理根目录（默认当前目录）
         \\  --max-sessions <n>   并发会话上限（默认 16）
         \\  -h, --help           显示本帮助
@@ -55,13 +58,15 @@ pub const Config = struct {
         \\    "host": "127.0.0.1",
         \\    "port": 7387,
         \\    "shell": "/bin/bash",
-        \\    "token": "change-me",
+        \\    "password": "change-me",
+        \\    "session_ttl_days": 7,
         \\    "root": "/srv/work",
         \\    "max_sessions": 16
         \\  }
         \\
         \\环境变量: MYTTY_CONFIG / MYTTY_HOST / MYTTY_PORT / MYTTY_SHELL /
-        \\          MYTTY_TOKEN / MYTTY_ROOT / MYTTY_MAX_SESSIONS
+        \\          MYTTY_PASSWORD / MYTTY_SESSION_TTL_DAYS /
+        \\          MYTTY_ROOT / MYTTY_MAX_SESSIONS
         \\
         \\TLS 不在本程序范围内：请只监听回环地址，把明文 HTTP/WS 交给外部反向代理。
         \\
@@ -72,7 +77,8 @@ pub const Config = struct {
         host: ?[]const u8 = null,
         port: ?u16 = null,
         shell: ?[]const u8 = null,
-        token: ?[]const u8 = null,
+        password: ?[]const u8 = null,
+        session_ttl_days: ?u32 = null,
         root: ?[]const u8 = null,
         max_sessions: ?u32 = null,
     };
@@ -94,7 +100,8 @@ pub const Config = struct {
         // 2) 环境变量
         if (env.get("MYTTY_HOST")) |v| cfg.host = v;
         if (env.get("MYTTY_ROOT")) |v| cfg.root = v;
-        if (env.get("MYTTY_TOKEN")) |v| cfg.token = v;
+        if (env.get("MYTTY_PASSWORD")) |v| cfg.password = v;
+        if (env.get("MYTTY_SESSION_TTL_DAYS")) |v| cfg.session_ttl_days = try parseCount(v);
         if (env.get("MYTTY_PORT")) |v| cfg.port = try parsePort(v);
         if (env.get("MYTTY_MAX_SESSIONS")) |v| cfg.max_sessions = try parseCount(v);
         if (env.get("MYTTY_SHELL")) |v| {
@@ -117,8 +124,10 @@ pub const Config = struct {
             } else if (optionValue(args, &i, "--shell")) |v| {
                 cfg.shell = v;
                 shell_set = true;
-            } else if (optionValue(args, &i, "--token")) |v| {
-                cfg.token = v;
+            } else if (optionValue(args, &i, "--password")) |v| {
+                cfg.password = v;
+            } else if (optionValue(args, &i, "--session-ttl-days")) |v| {
+                cfg.session_ttl_days = try parseCount(v);
             } else if (optionValue(args, &i, "--root")) |v| {
                 cfg.root = v;
             } else if (optionValue(args, &i, "--max-sessions")) |v| {
@@ -142,10 +151,10 @@ pub const Config = struct {
         _ = net.IpAddress.parseIp4(cfg.host, cfg.port) catch return error.InvalidHost;
         if (cfg.port == 0) return error.InvalidPort;
         if (cfg.max_sessions == 0) return error.InvalidPort;
-        if (cfg.token) |t| {
-            if (t.len == 0) return error.EmptyToken;
+        if (cfg.password) |p| {
+            if (p.len == 0) return error.EmptyPassword;
         }
-        if (!isLoopback(cfg.host) and cfg.token == null) return error.TokenRequired;
+        if (cfg.session_ttl_days == 0 or cfg.session_ttl_days > 365) return error.InvalidSessionTtl;
     }
 };
 
@@ -169,7 +178,8 @@ fn loadConfigFile(
     if (file.host) |v| cfg.host = try alloc.dupe(u8, v);
     if (file.port) |v| cfg.port = v;
     if (file.shell) |v| cfg.shell = try alloc.dupe(u8, v);
-    if (file.token) |v| cfg.token = try alloc.dupe(u8, v);
+    if (file.password) |v| cfg.password = try alloc.dupe(u8, v);
+    if (file.session_ttl_days) |v| cfg.session_ttl_days = v;
     if (file.root) |v| cfg.root = try alloc.dupe(u8, v);
     if (file.max_sessions) |v| cfg.max_sessions = v;
     return file.shell != null;
@@ -236,9 +246,11 @@ test "constant time equality" {
     try std.testing.expect(!constantTimeEql("abc", "ab"));
 }
 
-test "validate refuses public bind without token" {
-    var cfg: Config = .{ .host = "0.0.0.0" };
-    try std.testing.expectError(error.TokenRequired, cfg.validate());
-    cfg.token = "s3cret";
+test "validate session ttl bounds" {
+    var cfg: Config = .{};
     try cfg.validate();
+    cfg.session_ttl_days = 0;
+    try std.testing.expectError(error.InvalidSessionTtl, cfg.validate());
+    cfg.session_ttl_days = 366;
+    try std.testing.expectError(error.InvalidSessionTtl, cfg.validate());
 }

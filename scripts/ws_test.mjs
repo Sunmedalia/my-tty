@@ -1,16 +1,48 @@
 #!/usr/bin/env node
-// 最小 WebSocket 冒烟客户端：连上 PTY，执行命令，断言输出。
-// 用法: node ws_test.mjs <ws-url> [期望字符串...]
+// 认证 + WebSocket 冒烟：先登录取 Cookie，再领一次性票据，连 PTY 执行命令。
+// 用法: node ws_test.mjs <http-base> <password> [期望字符串...]
 
-const url = process.argv[2];
-const expects = process.argv.slice(3);
-if (!url) {
-  console.error("usage: node ws_test.mjs <ws-url> [expect...]");
+const base = process.argv[2];
+const password = process.argv[3];
+const expects = process.argv.slice(4);
+if (!base || !password) {
+  console.error("usage: node ws_test.mjs <http-base> <password> [expect...]");
   process.exit(2);
 }
 if (expects.length === 0) expects.push("MYTTY_RESULT_OK", "Linux");
 
-const ws = new WebSocket(url);
+const login = await fetch(`${base}/api/auth/login`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ password }),
+});
+if (!login.ok) {
+  console.error("login failed:", login.status);
+  process.exit(1);
+}
+const setCookie =
+  (login.headers.getSetCookie && login.headers.getSetCookie()[0]) ||
+  login.headers.get("set-cookie") ||
+  "";
+const cookie = setCookie.split(";")[0];
+
+const denied = await fetch(`${base}/api/fs/list?path=`);
+if (denied.status !== 401) {
+  console.error("expected 401 before auth, got", denied.status);
+  process.exit(1);
+}
+
+const ticketRes = await fetch(`${base}/api/auth/ticket`, {
+  method: "POST",
+  headers: { cookie },
+});
+if (!ticketRes.ok) {
+  console.error("ticket failed:", ticketRes.status);
+  process.exit(1);
+}
+const { ticket } = await ticketRes.json();
+
+const ws = new WebSocket(`${base.replace(/^http/, "ws")}/ws?ticket=${encodeURIComponent(ticket)}`);
 ws.binaryType = "arraybuffer";
 
 let output = "";

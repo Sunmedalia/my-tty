@@ -1,7 +1,8 @@
 //! HTTP 路由 + 连接生命周期。
 //!
 //! 只用 std.http.Server；一条连接一个线程，静态资源全部来自内存。
-//! 这里没有任何 TLS 代码：进程只监听回环地址，由外部反向代理负责加密。
+//! 除登录页外壳和 `/healthz` 外，所有功能（文件 API、WebSocket/PTY）都要求
+//! 已登录的会话 Cookie。这里没有任何 TLS 代码。
 
 const std = @import("std");
 const http = std.http;
@@ -10,6 +11,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const assets = @import("assets.zig");
+const auth = @import("auth.zig");
 const config = @import("config.zig");
 const session = @import("session.zig");
 const fsapi = @import("fsapi.zig");
@@ -28,16 +30,18 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
         return err;
     };
 
+    var auth_state = auth.Auth.init(io, cfg.password orelse unreachable, cfg.session_ttl_days);
+
     const addr = try net.IpAddress.parseIp4(cfg.host, cfg.port);
     var listener = try addr.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
 
-    std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  root={s}  token={s}\n", .{
+    std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  root={s}  会话={d} 天\n", .{
         cfg.host,
         cfg.port,
         cfg.shell,
         fs.root,
-        if (cfg.token == null) "无" else "有",
+        cfg.session_ttl_days,
     });
 
     while (true) {
@@ -48,7 +52,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
                 continue;
             },
         };
-        const thread = std.Thread.spawn(.{}, connectionMain, .{ io, gpa, stream, cfg, &fs }) catch {
+        const thread = std.Thread.spawn(.{}, connectionMain, .{ io, gpa, stream, cfg, &fs, &auth_state }) catch {
             stream.close(io);
             continue;
         };
@@ -56,7 +60,14 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     }
 }
 
-fn connectionMain(io: Io, gpa: Allocator, stream: net.Stream, cfg: *const config.Config, fs: *const fsapi.Fs) void {
+fn connectionMain(
+    io: Io,
+    gpa: Allocator,
+    stream: net.Stream,
+    cfg: *const config.Config,
+    fs: *const fsapi.Fs,
+    auth_state: *auth.Auth,
+) void {
     defer stream.close(io);
 
     var read_buf: [64 * 1024]u8 = undefined;
@@ -74,7 +85,7 @@ fn connectionMain(io: Io, gpa: Allocator, stream: net.Stream, cfg: *const config
                     respond(&request, "bad websocket request\n", .bad_request) catch {};
                     return;
                 };
-                if (!authorized(&request, cfg)) {
+                if (!wsAuthorized(auth_state, &request)) {
                     respond(&request, "unauthorized\n", .unauthorized) catch {};
                     return;
                 }
@@ -90,19 +101,34 @@ fn connectionMain(io: Io, gpa: Allocator, stream: net.Stream, cfg: *const config
                 return;
             },
             .none => {
-                handleHttp(io, gpa, cfg, fs, &request) catch return;
+                handleHttp(io, gpa, cfg, fs, auth_state, &request) catch return;
             },
         }
     }
 }
 
-fn handleHttp(io: Io, gpa: Allocator, cfg: *const config.Config, fs: *const fsapi.Fs, request: *http.Server.Request) !void {
-    const target = request.head.target;
-    const path = util.pathOnly(target);
+fn handleHttp(
+    io: Io,
+    gpa: Allocator,
+    cfg: *const config.Config,
+    fs: *const fsapi.Fs,
+    auth_state: *auth.Auth,
+    request: *http.Server.Request,
+) !void {
+    const path = util.pathOnly(request.head.target);
+
+    // 登录相关端点必须放在鉴权之前，否则没法登录。
+    if (std.mem.eql(u8, path, "/api/auth/login")) return handleLogin(io, gpa, cfg, auth_state, request);
+    if (std.mem.eql(u8, path, "/api/auth/logout")) return handleLogout(auth_state, request);
+    if (std.mem.eql(u8, path, "/api/auth/status")) return handleStatus(auth_state, request);
+    if (std.mem.eql(u8, path, "/api/auth/ticket")) {
+        if (!authorized(auth_state, request)) return deny(request);
+        return handleTicket(auth_state, request);
+    }
 
     // 文件 API 自己校验 HTTP 方法，所以放在统一的 GET/HEAD 检查之前。
     if (std.mem.startsWith(u8, path, "/api/")) {
-        if (!authorized(request, cfg)) return respond(request, "unauthorized\n", .unauthorized);
+        if (!authorized(auth_state, request)) return deny(request);
         return fsapi.handle(io, gpa, fs, request);
     }
 
@@ -118,6 +144,7 @@ fn handleHttp(io: Io, gpa: Allocator, cfg: *const config.Config, fs: *const fsap
         return respond(request, "", .no_content);
     }
 
+    // 页面外壳与静态资源公开加载；真正的功能都在上面的 API/WS 后面。
     const asset = assets.find(path) orelse {
         return respond(request, "not found\n", .not_found);
     };
@@ -127,6 +154,117 @@ fn handleHttp(io: Io, gpa: Allocator, cfg: *const config.Config, fs: *const fsap
         .{ .name = "cache-control", .value = asset.cache_control },
     });
     return request.respond(asset.body, .{ .extra_headers = list });
+}
+
+// ---------------------------------------------------------------------------
+// 登录 / 注销
+// ---------------------------------------------------------------------------
+
+const LoginRequest = struct {
+    password: []const u8 = "",
+};
+
+fn handleLogin(
+    io: Io,
+    gpa: Allocator,
+    cfg: *const config.Config,
+    auth_state: *auth.Auth,
+    request: *http.Server.Request,
+) !void {
+    if (request.head.method != .POST) return respond(request, "method not allowed\n", .method_not_allowed);
+
+    // 读 body 之后 head/header 迭代器不再可用，先把 Cookie 相关判断做掉。
+    const secure = auth.isSecureRequest(request);
+
+    var body_buf: [4096]u8 = undefined;
+    const reader = request.readerExpectNone(&body_buf);
+    const body = reader.allocRemaining(gpa, .limited(4096)) catch
+        return respond(request, "{\"error\":\"bad_body\"}\n", .bad_request);
+    defer gpa.free(body);
+
+    var parsed = std.json.parseFromSlice(LoginRequest, gpa, body, .{ .ignore_unknown_fields = true }) catch
+        return respond(request, "{\"error\":\"bad_body\"}\n", .bad_request);
+    defer parsed.deinit();
+
+    const login = auth_state.login(parsed.value.password) orelse {
+        // 简单延迟，降低在线爆破速度；不阻塞其它连接线程。
+        Io.sleep(io, Io.Duration.fromMilliseconds(250), .real) catch {};
+        return respond(request, "{\"error\":\"invalid_password\"}\n", .unauthorized);
+    };
+
+    const ttl_seconds: i64 = @as(i64, @intCast(cfg.session_ttl_days)) * 86400;
+    var cookie_buf: [256]u8 = undefined;
+    const cookie = auth.setCookieValue(&cookie_buf, login.cookie[0..], ttl_seconds, secure);
+
+    var json_buf: [96]u8 = undefined;
+    const json = std.fmt.bufPrint(&json_buf, "{{\"ok\":true,\"expires_at\":{d}}}", .{login.expires_at_s}) catch
+        "{\"ok\":true}";
+
+    var headers: [8]http.Header = undefined;
+    const list = buildHeaders(&headers, &.{
+        .{ .name = "content-type", .value = "application/json; charset=utf-8" },
+        .{ .name = "cache-control", .value = "no-store" },
+        .{ .name = "set-cookie", .value = cookie },
+    });
+    return request.respond(json, .{ .extra_headers = list });
+}
+
+fn handleLogout(auth_state: *auth.Auth, request: *http.Server.Request) !void {
+    if (request.head.method != .POST) return respond(request, "method not allowed\n", .method_not_allowed);
+
+    if (auth.cookieFromRequest(request)) |cookie| auth_state.logout(cookie);
+
+    var cookie_buf: [256]u8 = undefined;
+    const cookie = auth.setCookieValue(&cookie_buf, null, 0, auth.isSecureRequest(request));
+
+    var headers: [8]http.Header = undefined;
+    const list = buildHeaders(&headers, &.{
+        .{ .name = "content-type", .value = "application/json; charset=utf-8" },
+        .{ .name = "cache-control", .value = "no-store" },
+        .{ .name = "set-cookie", .value = cookie },
+    });
+    return request.respond("{\"ok\":true}", .{ .extra_headers = list });
+}
+
+fn handleTicket(auth_state: *auth.Auth, request: *http.Server.Request) !void {
+    if (request.head.method != .POST) return respond(request, "method not allowed\n", .method_not_allowed);
+    const ticket = auth_state.issueTicket() orelse
+        return respond(request, "{\"error\":\"out_of_tickets\"}\n", .service_unavailable);
+
+    var buf: [64]u8 = undefined;
+    const json = std.fmt.bufPrint(&buf, "{{\"ticket\":\"{s}\"}}", .{ticket}) catch
+        "{\"error\":\"encode_failed\"}";
+    return respond(request, json, .ok);
+}
+
+fn handleStatus(auth_state: *auth.Auth, request: *http.Server.Request) !void {
+    if (request.head.method != .GET) return respond(request, "method not allowed\n", .method_not_allowed);
+    const ok = authorized(auth_state, request);
+    return respond(
+        request,
+        if (ok) "{\"authenticated\":true}" else "{\"authenticated\":false}",
+        .ok,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
+
+fn authorized(auth_state: *auth.Auth, request: *const http.Server.Request) bool {
+    const cookie = auth.cookieFromRequest(request) orelse return false;
+    return auth_state.validate(cookie);
+}
+
+/// WebSocket：会话 Cookie 或一次性票据都行（浏览器/自动化客户端各取所需）。
+fn wsAuthorized(auth_state: *auth.Auth, request: *const http.Server.Request) bool {
+    if (authorized(auth_state, request)) return true;
+    const ticket = util.queryParam(request.head.target, "ticket") orelse return false;
+    return auth_state.consumeTicket(ticket);
+}
+
+fn deny(request: *http.Server.Request) !void {
+    return respond(request, "{\"error\":\"unauthorized\"}\n", .unauthorized);
 }
 
 fn respond(request: *http.Server.Request, body: []const u8, status: http.Status) !void {
@@ -143,30 +281,4 @@ fn buildHeaders(dst: []http.Header, extra: []const http.Header) []const http.Hea
     @memcpy(dst[0..extra.len], extra);
     @memcpy(dst[extra.len..][0..security_headers.len], &security_headers);
     return dst[0 .. extra.len + security_headers.len];
-}
-
-fn authorized(request: *const http.Server.Request, cfg: *const config.Config) bool {
-    const expected = cfg.token orelse return true;
-
-    if (util.queryParam(request.head.target, "token")) |got| {
-        if (config.constantTimeEql(got, expected)) return true;
-    }
-
-    var it = request.iterateHeaders();
-    while (it.next()) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, "x-mytty-token")) {
-            if (config.constantTimeEql(header.value, expected)) return true;
-        }
-    }
-    return false;
-}
-
-fn queryParam(target: []const u8, key: []const u8) ?[]const u8 {
-    const qmark = std.mem.indexOfScalar(u8, target, '?') orelse return null;
-    var it = std.mem.splitScalar(u8, target[qmark + 1 ..], '&');
-    while (it.next()) |pair| {
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
-        if (std.mem.eql(u8, pair[0..eq], key)) return pair[eq + 1 ..];
-    }
-    return null;
 }

@@ -13,6 +13,7 @@ test {
     _ = @import("pty.zig");
     _ = @import("session.zig");
     _ = @import("util.zig");
+    _ = @import("auth.zig");
     _ = @import("fsapi.zig");
     std.testing.refAllDecls(@This());
 }

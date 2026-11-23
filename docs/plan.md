@@ -59,10 +59,11 @@ browser
  │  HTTP GET  /、/app.js、/vendor/*      → 内嵌静态资源
  │  HTTP     /api/fs/*                   → 文件管理/编辑（JSON）
  │  HTTP     /healthz
- │  WS       /ws?token=…                 → 一个 PTY 会话
+ │  WS       /ws?ticket=…                → 一个 PTY 会话（票据 30s）
  ▼
 Zig 单进程
- ├─ server.zig   路由、鉴权、静态资源、连接线程
+ ├─ server.zig   路由、登录/注销、静态资源、连接线程
+ ├─ auth.zig     密码登录、7 天会话、一次性 WS 票据
  ├─ session.zig  WS ⇄ PTY 桥（每会话 2 线程）
  ├─ pty.zig      /dev/ptmx + fork/exec（Linux）
  ├─ fsapi.zig    受限文件系统 API（root sandbox）
@@ -88,7 +89,8 @@ Zig 单进程
   "host": "127.0.0.1",
   "port": 7387,
   "shell": "/bin/bash",
-  "token": "please-change-me",
+  "password": "please-change-me",
+  "session_ttl_days": 7,
   "root": "/srv/work",
   "max_sessions": 16
 }
@@ -99,12 +101,13 @@ Zig 单进程
 | 监听地址 | `host` | `MYTTY_HOST` | `--host` |
 | 端口 | `port` | `MYTTY_PORT` | `--port` |
 | shell | `shell` | `MYTTY_SHELL` | `--shell` |
-| 令牌 | `token` | `MYTTY_TOKEN` | `--token` |
+| 登录密码 | `password` | `MYTTY_PASSWORD` | `--password` |
+| 会话有效期（天） | `session_ttl_days` | `MYTTY_SESSION_TTL_DAYS` | `--session-ttl-days` |
 | 文件根 | `root` | `MYTTY_ROOT` | `--root` |
 | 会话上限 | `max_sessions` | `MYTTY_MAX_SESSIONS` | `--max-sessions` |
 
 未显式配置 shell 时，才用进程 `$SHELL` 兜底（避免环境变量意外覆盖配置文件）。
-监听非回环地址时**强制要求 token**。
+未配置密码时，启动阶段生成随机密码并打印一次；所有功能都要求登录。
 
 ---
 
@@ -123,7 +126,7 @@ Zig 单进程
 
 ### 5.2 文件 API（HTTP + JSON）
 
-所有请求需带 token（若配置）：`X-MyTTY-Token: <token>` 或 `?token=`。
+所有 API 都需要登录后的会话 Cookie（浏览器自动携带）。
 路径参数 `path` 一律是**相对 root** 的 POSIX 路径，服务端做规范化与真实路径校验。
 
 | 方法 | 路径 | 语义 | 成功响应 |
@@ -136,12 +139,25 @@ Zig 单进程
 | DELETE | `/api/fs/delete?path=` | 文件或目录（递归） | `{"ok":true}` |
 
 错误统一 `{"error":"code"}` + 恰当 HTTP 状态：`400`（参数/路径非法）、
-`401`（token）、`403`（越出 root）、`404`、`409`、`413`（过大）、`500`。
+`401`（未登录）、`403`（越出 root）、`404`、`409`、`413`（过大）、`500`。
 
-### 5.3 安全边界
+### 5.3 登录接口
 
-- 只监听回环（默认）；公网绑定必须 token，否则拒绝启动。
-- Token 定长时间比较。
+| 方法 | 路径 | 语义 |
+|---|---|---|
+| POST | `/api/auth/login` | JSON `{"password":…}`；成功返回 `Set-Cookie` 会话，7 天 |
+| POST | `/api/auth/logout` | 删除服务端会话并清 Cookie |
+| GET | `/api/auth/status` | `{"authenticated":bool}` |
+| POST | `/api/auth/ticket` | 已登录时签发 30 秒一次性 WS 票据 |
+
+WebSocket 升级既接受会话 Cookie，也接受 `?ticket=`（一次性）。
+
+### 5.4 安全边界
+
+- 只监听回环（默认）；所有功能都要求登录会话。
+- 密码定长时间比较；登录失败固定延迟 250ms。
+- 会话 Cookie：`HttpOnly; SameSite=Strict; Path=/`，反向代理为 HTTPS 时加 `Secure`。
+- WebSocket 票据 30 秒、一次性；注销立即失效。
 - 文件 API 以启动时 `realpath(root)` 为唯一边界；每个目标是 `realPathFileAlloc`
   后再做前缀校验，符号链接无法逃逸。新建文件先校验父目录。
 - 读取上限 1 MiB；拒绝 NUL（二进制）；写请求体上限 1 MiB。
@@ -198,7 +214,8 @@ my-tty/
   src/
     main.zig       入口：help、配置、启动
     config.zig     三层配置 + 校验（已实现）
-    server.zig     路由/鉴权/静态资源/连接线程（已实现）
+    server.zig     路由/登录/静态资源/连接线程（已实现）
+    auth.zig       密码登录、会话、WS 票据（已实现）
     session.zig    WS ⇄ PTY 协议与生命周期（已实现）
     pty.zig        Linux PTY（已实现）
     fsapi.zig      文件管理/编辑 API（待实现）
@@ -223,6 +240,13 @@ my-tty/
 - [x] WebSocket 升级 + PTY 双向数据（spike 已用 `echo/uname/tty` 验证）。
 - [x] 配置：文件/环境/命令行优先级，非法值拒绝启动。
 - [x] 断线/关闭时回收 shell（HUP/TERM + waitpid）。
+
+### P0.5 登录认证（已完成）
+
+- [x] 弹窗登录、注销按钮；未登录时终端/文件 API/WS 全部 401。
+- [x] 会话 7 天（可配 1–365），服务端内存会话 + HttpOnly Cookie。
+- [x] 注销删除服务端会话并清 Cookie；页面刷新保持登录。
+- [x] headless Chromium 验收：错误密码提示、登录、刷新保持、注销失效。
 
 ### P1 文件管理与编辑（已完成）
 

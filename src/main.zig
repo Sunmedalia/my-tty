@@ -26,6 +26,17 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     };
 
+    if (cfg.password == null) {
+        var raw: [12]u8 = undefined;
+        init.io.random(&raw);
+        const hex = std.fmt.bytesToHex(raw, .lower);
+        cfg.password = arena.dupe(u8, &hex) catch {
+            std.debug.print("无法生成随机密码\n", .{});
+            std.process.exit(2);
+        };
+        std.debug.print("未配置密码，本次启动使用随机密码: {s}\n（重启会更换；请用 --password 或配置文件固定）\n", .{cfg.password.?});
+    }
+
     server.run(init.io, init.gpa, &cfg) catch |err| {
         std.debug.print("启动失败: {t}\n", .{err});
         std.process.exit(1);
@@ -38,8 +49,8 @@ fn describe(err: config.Config.ParseError) []const u8 {
         error.MissingValue => "参数缺少取值",
         error.InvalidPort => "端口或并发数不合法",
         error.InvalidHost => "监听地址必须是 IPv4 字面量",
-        error.EmptyToken => "token 不能为空",
-        error.TokenRequired => "监听非回环地址时必须设置 --token",
+        error.EmptyPassword => "密码不能为空",
+        error.InvalidSessionTtl => "登录有效期必须在 1–365 天之间",
         error.ConfigReadFailed => "配置文件读取失败",
         error.ConfigInvalid => "配置文件不是合法 JSON 或字段类型不对",
         else => "未知错误",

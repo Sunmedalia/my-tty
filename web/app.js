@@ -19,16 +19,21 @@
   const editorStateEl = document.getElementById("editor-state");
   const editorSaveBtn = document.getElementById("editor-save");
   const editorCloseBtn = document.getElementById("editor-close");
+  const logoutBtn = document.getElementById("logout");
+  const loginOverlay = document.getElementById("login-overlay");
+  const loginForm = document.getElementById("login-form");
+  const loginPassword = document.getElementById("login-password");
+  const loginError = document.getElementById("login-error");
+  const loginSubmit = document.getElementById("login-submit");
 
-  const params = new URLSearchParams(location.search);
-  const token = params.get("token");
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  const wsBase = `${scheme}//${location.host}/ws` + (token ? `?token=${encodeURIComponent(token)}` : "");
+  const wsBase = `${scheme}//${location.host}/ws`;
 
   const panes = [];
   let activePane = null;
   let currentDir = "";
   let editing = null; // { path, dirty }
+  let started = false;
 
   // ---------------------------------------------------------------- terminals
 
@@ -95,7 +100,7 @@
     if (pane) pane.term.focus();
   }
 
-  function removePane(pane) {
+  function removePane(pane, respawn = true) {
     const idx = panes.indexOf(pane);
     if (idx === -1) return;
     if (pane.ws) {
@@ -111,15 +116,35 @@
       activePane = panes[Math.min(idx, panes.length - 1)] || null;
       if (activePane) focusPane(activePane);
     }
-    if (panes.length === 0) createPane();
-    else layout();
+    if (panes.length === 0) {
+      if (respawn && started) createPane();
+    } else {
+      layout();
+    }
   }
 
-  function connectPane(pane) {
+  async function connectPane(pane) {
     setPaneStatus(pane, "连接中…", "pending");
+
+    let ticket = "";
+    try {
+      const res = await fetch("/api/auth/ticket", { method: "POST" });
+      if (!res.ok) {
+        if (res.status === 401) showLogin("登录已失效，请重新登录");
+        setPaneStatus(pane, "认证失败（点击重试）", "error");
+        pane.reconnect = () => connectPane(pane);
+        return;
+      }
+      ticket = (await res.json()).ticket || "";
+    } catch (err) {
+      setPaneStatus(pane, "无法获取连接票据", "error");
+      pane.reconnect = () => connectPane(pane);
+      return;
+    }
+
     let ws;
     try {
-      ws = new WebSocket(wsBase);
+      ws = new WebSocket(`${wsBase}?ticket=${encodeURIComponent(ticket)}`);
     } catch (err) {
       setPaneStatus(pane, "连接失败", "error");
       return;
@@ -159,9 +184,7 @@
       updateSummary();
     };
     ws.onerror = () => {
-      if (!pane.alive) {
-        setPaneStatus(pane, "连接被拒绝" + (token ? "" : "（缺 token？）"), "error");
-      }
+      if (!pane.alive) setPaneStatus(pane, "连接被拒绝", "error");
     };
   }
 
@@ -261,13 +284,16 @@
   async function api(method, action, query, body) {
     const qs = query ? `?${new URLSearchParams(query)}` : "";
     const headers = {};
-    if (token) headers["X-MyTTY-Token"] = token;
     if (body !== undefined) headers["Content-Type"] = "text/plain; charset=utf-8";
     const res = await fetch(`/api/fs/${action}${qs}`, { method, headers, body });
     let data = {};
     try {
       data = await res.json();
     } catch (_) {}
+    if (res.status === 401) {
+      showLogin("登录已失效，请重新登录");
+      throw new Error("unauthorized");
+    }
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     return data;
   }
@@ -558,6 +584,82 @@
     brightWhite: "#c0caf5",
   };
 
-  createPane();
-  refreshFiles();
+  // ------------------------------------------------------------- 登录状态
+
+  function showLogin(message) {
+    loginOverlay.hidden = false;
+    loginError.textContent = message || "";
+    loginPassword.value = "";
+    setTimeout(() => loginPassword.focus(), 30);
+  }
+
+  function hideLogin() {
+    loginOverlay.hidden = true;
+    loginError.textContent = "";
+  }
+
+  function startApp() {
+    hideLogin();
+    if (started) return;
+    started = true;
+    if (panes.length === 0) createPane();
+    else layout();
+    refreshFiles();
+  }
+
+  function stopApp() {
+    started = false;
+    for (const pane of [...panes]) removePane(pane, false);
+    panes.length = 0;
+  }
+
+  async function refreshAuth() {
+    try {
+      const res = await fetch("/api/auth/status");
+      const data = await res.json();
+      if (data.authenticated) startApp();
+      else showLogin();
+    } catch (_) {
+      showLogin("无法连接服务端");
+    }
+  }
+
+  loginForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const password = loginPassword.value;
+    if (!password) return;
+    loginSubmit.disabled = true;
+    loginError.textContent = "";
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!res.ok) {
+        loginError.textContent =
+          res.status === 401 ? "密码不正确" : `登录失败（HTTP ${res.status}）`;
+        loginPassword.select();
+        return;
+      }
+      loginPassword.value = "";
+      startApp();
+    } catch (_) {
+      loginError.textContent = "网络错误，请重试";
+    } finally {
+      loginSubmit.disabled = false;
+    }
+  });
+
+  logoutBtn.addEventListener("click", async () => {
+    logoutBtn.disabled = true;
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch (_) {}
+    logoutBtn.disabled = false;
+    stopApp();
+    showLogin("已注销");
+  });
+
+  refreshAuth();
 })();

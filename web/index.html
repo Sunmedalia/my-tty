@@ -17,6 +17,7 @@
         <span id="hint">Ctrl+Shift+C 复制 · Ctrl+Shift+V 粘贴</span>
         <button id="toggle-files" type="button">文件</button>
         <button id="add-pane" type="button">+ 分屏</button>
+        <button id="logout" type="button">注销</button>
       </header>
 
       <div id="body">
@@ -34,6 +35,23 @@
 
         <main id="workspace" data-count="0"></main>
       </div>
+    </div>
+
+    <div id="login-overlay" hidden>
+      <form id="login-form" class="login-card">
+        <h1>登录 my-tty</h1>
+        <p class="sub">所有终端与文件功能都需要登录后使用</p>
+        <input
+          id="login-password"
+          type="password"
+          autocomplete="current-password"
+          placeholder="访问密码"
+          required
+        />
+        <p id="login-error"></p>
+        <button id="login-submit" type="submit">登录</button>
+        <p class="ttl">登录状态默认保持 7 天</p>
+      </form>
     </div>
 
     <div id="editor-overlay" hidden>
