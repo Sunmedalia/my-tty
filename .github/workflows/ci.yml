@@ -23,7 +23,7 @@ jobs:
           version: 0.17.1
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
       - name: format
         run: zig fmt --check build.zig src/*.zig web/embed.zig
       - name: build
@@ -45,7 +45,7 @@ jobs:
           version: 0.17.1
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
       - name: install browser deps
         working-directory: tests/browser
         run: |
