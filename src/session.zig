@@ -155,20 +155,12 @@ pub const Manager = struct {
 
         session.mutex.lockUncancelable(self.io);
         if (session.attachment == att) session.attachment = null;
-        const detached = session.attachment == null;
         session.last_activity_ns = self.now();
         session.mutex.unlock(self.io);
 
         _ = self.live_attachments.fetchSub(1, .acq_rel);
-
-        if (detached and self.cfg.pty_idle_minutes == 0) {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            session.mutex.lockUncancelable(self.io);
-            const still_idle = session.attachment == null;
-            session.mutex.unlock(self.io);
-            if (still_idle and self.containsLocked(session)) self.destroyLocked(session);
-        }
+        // 不在连接线程里销毁会话：sweep 每秒跑一次，由它统一回收，
+        // 避免 detach 之后再次解引用可能已被 attach/sweep 释放的 session。
     }
 
     /// 前端主动 {t:"close"}：立刻结束 shell，而不是留在后台等 TTL。
@@ -186,6 +178,9 @@ pub const Manager = struct {
 
         // 已经被别的连接接管时，不能替对方把会话杀掉。
         if (!was_current) return;
+
+        // 叫醒可能正卡在“写终端输出”的 pump 线程，否则 destroy 里的 join 会一直等。
+        att.stream.shutdown(self.io, .both) catch {};
 
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -219,6 +214,19 @@ pub const Manager = struct {
             } else {
                 i += 1;
             }
+        }
+    }
+
+    /// 退出兜底：只杀 shell（连同后台作业），不释放任何会话结构。
+    /// 只应在连接线程可能还引用 manager 时使用。
+    pub fn killChildren(self: *Manager) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.sessions.items) |s| {
+            s.stopping.store(true, .release);
+            killSessionProcesses(self.io, s.child);
+            _ = linux.kill(-s.child, .KILL);
+            _ = linux.kill(s.child, .KILL);
         }
     }
 
@@ -618,6 +626,52 @@ test "ring buffer replay offsets" {
     try std.testing.expectEqual(@as(usize, 16), s.len);
     try std.testing.expectEqual(@as(u64, 4), s.start_abs);
     try std.testing.expectEqual(@as(u64, 20), s.total);
+}
+
+test "ring buffer keeps the newest bytes for arbitrary appends" {
+    const io = std.testing.io;
+    var cfg = config.Config{};
+    var m = Manager.init(io, std.testing.allocator, &cfg);
+
+    var storage: [37]u8 = undefined;
+    var s: Session = .{
+        .manager = &m,
+        .id = @splat(0),
+        .master = -1,
+        .child = -1,
+        .buf = &storage,
+    };
+
+    var reference: std.ArrayList(u8) = .empty;
+    defer reference.deinit(std.testing.allocator);
+
+    var seed: u64 = 0x9e3779b97f4a7c15;
+    var step: usize = 0;
+    while (step < 300) : (step += 1) {
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        const len = 1 + @as(usize, @intCast((seed >> 40) % 60));
+        var tmp: [64]u8 = undefined;
+        for (tmp[0..len]) |*b| {
+            seed = seed *% 6364136223846793005 +% 1442695040888963407;
+            b.* = @truncate(seed >> 33);
+        }
+
+        s.appendLocked(tmp[0..len]);
+        try reference.appendSlice(std.testing.allocator, tmp[0..len]);
+
+        const keep = @min(reference.items.len, storage.len);
+        try std.testing.expectEqual(keep, s.len);
+        try std.testing.expectEqual(reference.items.len, s.total);
+        try std.testing.expectEqual(reference.items.len - keep, s.start_abs);
+
+        var got: [storage.len]u8 = undefined;
+        for (0..s.len) |i| got[i] = s.buf[(s.start + i) % s.buf.len];
+        try std.testing.expectEqualSlices(
+            u8,
+            reference.items[reference.items.len - keep ..],
+            got[0..s.len],
+        );
+    }
 }
 
 test "control message parsing" {

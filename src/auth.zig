@@ -126,7 +126,7 @@ pub const Auth = struct {
                 s.used = false;
                 continue;
             }
-            if (std.mem.eql(u8, &s.id, &raw)) {
+            if (config.constantTimeEql(&s.id, &raw)) {
                 s.last_seen_ns = now;
                 return true;
             }
@@ -175,7 +175,7 @@ pub const Auth = struct {
                 t.used = false;
                 continue;
             }
-            if (std.mem.eql(u8, &t.id, &raw)) {
+            if (config.constantTimeEql(&t.id, &raw)) {
                 t.used = false;
                 return true;
             }
@@ -212,7 +212,7 @@ pub const Auth = struct {
         defer self.mutex.unlock(self.io);
 
         for (&self.sessions) |*s| {
-            if (s.used and std.mem.eql(u8, &s.id, &raw)) {
+            if (s.used and config.constantTimeEql(&s.id, &raw)) {
                 s.used = false;
                 s.expires_ns = 0;
                 return;

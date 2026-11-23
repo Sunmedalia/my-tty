@@ -171,11 +171,27 @@ pub fn writeAll(master: posix.fd_t, data: []const u8) !void {
     }
 }
 
-/// 回收 shell，避免僵尸进程。优先 HUP（终端挂断语义），再等待。
+/// 回收 shell，避免僵尸进程。优先 HUP（终端挂断语义），再等待；
+/// 如果 shell 忽略 HUP/TERM，300ms 后 SIGKILL，避免销毁会话时永久卡住。
 pub fn reap(child: posix.pid_t) void {
     _ = linux.kill(child, .HUP);
     _ = linux.kill(child, .TERM);
+
     var status: i32 = 0;
+    var i: u8 = 0;
+    while (i < 30) : (i += 1) {
+        const rc = linux.waitpid(child, &status, posix.W.NOHANG);
+        switch (linux.errno(rc)) {
+            .SUCCESS => if (rc != 0) return,
+            .CHILD => return,
+            else => {},
+        }
+        const tick: linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = linux.nanosleep(&tick, null);
+    }
+
+    _ = linux.kill(-child, .KILL);
+    _ = linux.kill(child, .KILL);
     _ = linux.waitpid(child, &status, 0);
 }
 

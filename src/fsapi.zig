@@ -85,8 +85,14 @@ pub fn handle(io: Io, gpa: Allocator, fs: *const Fs, request: *http.Server.Reque
     return fail(request, arena, .not_found, "not_found");
 }
 
+/// 取 query 参数并按 urlencoded 解码（`+` = 空格，`%XX`）。编码非法时按空串处理，
+/// 由各接口返回 invalid_path / invalid_id 之类的参数错误。
+fn param(arena: Allocator, request: *http.Server.Request, key: []const u8) []const u8 {
+    return (util.queryParamDecoded(arena, request.head.target, key) catch null) orelse "";
+}
+
 fn list(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+    const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
 
@@ -116,7 +122,7 @@ fn list(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) 
 }
 
 fn read(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+    const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
     const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
@@ -136,7 +142,7 @@ fn read(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) 
 }
 
 fn write(io: Io, gpa: Allocator, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+    const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
 
@@ -165,7 +171,7 @@ fn write(io: Io, gpa: Allocator, arena: Allocator, fs: *const Fs, request: *http
 }
 
 fn makeDir(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+    const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
     const abs = resolveCreatePath(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
@@ -176,9 +182,9 @@ fn makeDir(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Reques
 }
 
 fn rename(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const from_rel = normalized(arena, util.queryParam(request.head.target, "from") orelse "") catch
+    const from_rel = normalized(arena, param(arena, request, "from")) catch
         return fail(request, arena, .bad_request, "invalid_path");
-    const to_rel = normalized(arena, util.queryParam(request.head.target, "to") orelse "") catch
+    const to_rel = normalized(arena, param(arena, request, "to")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (from_rel.len == 0 or to_rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
 
@@ -192,7 +198,7 @@ fn rename(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
 }
 
 fn delete(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+    const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
     const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
@@ -210,12 +216,12 @@ fn delete(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
 }
 
 fn upload(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+    const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
 
-    const id = util.queryParam(request.head.target, "id");
-    if (id) |raw_id| {
+    const raw_id = param(arena, request, "id");
+    if (raw_id.len != 0) {
         const valid = validUploadId(raw_id) orelse
             return fail(request, arena, .bad_request, "invalid_id");
         return uploadChunk(io, arena, fs, rel, valid, request);
@@ -254,9 +260,9 @@ fn uploadSingle(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, reques
 }
 
 fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []const u8, request: *http.Server.Request) !void {
-    const offset = parseU64(util.queryParam(request.head.target, "offset") orelse "") orelse
+    const offset = parseU64(param(arena, request, "offset")) orelse
         return fail(request, arena, .bad_request, "invalid_offset");
-    const total = parseU64(util.queryParam(request.head.target, "total") orelse "") orelse
+    const total = parseU64(param(arena, request, "total")) orelse
         return fail(request, arena, .bad_request, "invalid_total");
     if (total == 0 or total > max_upload) return fail(request, arena, .payload_too_large, "upload_too_large");
     if (offset > total) return fail(request, arena, .bad_request, "invalid_offset");
@@ -267,10 +273,16 @@ fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []c
 
     var file: std.Io.File = undefined;
     if (offset == 0) {
-        file = Dir.cwd().createFile(io, temp, .{ .truncate = true }) catch |err|
+        // 先删掉旧临时文件再独占创建：既避免复用上次的半截内容，也避免
+        // open(O_TRUNC) 跟随攻击者预先放在这里的符号链接写到 root 之外。
+        Dir.cwd().deleteFile(io, temp) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return failMapped(request, arena, err),
+        };
+        file = Dir.cwd().createFile(io, temp, .{ .truncate = true, .exclusive = true }) catch |err|
             return failMapped(request, arena, err);
     } else {
-        file = Dir.cwd().openFile(io, temp, .{ .mode = .read_write }) catch |err| switch (err) {
+        file = Dir.cwd().openFile(io, temp, .{ .mode = .read_write, .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => return failOffset(request, arena, .conflict, "offset_mismatch", 0),
             else => return failMapped(request, arena, err),
         };
@@ -318,10 +330,10 @@ fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []c
 }
 
 fn uploadStatus(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+    const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
-    const raw_id = util.queryParam(request.head.target, "id") orelse
-        return fail(request, arena, .bad_request, "invalid_id");
+    const raw_id = param(arena, request, "id");
+    if (raw_id.len == 0) return fail(request, arena, .bad_request, "invalid_id");
     const id = validUploadId(raw_id) orelse return fail(request, arena, .bad_request, "invalid_id");
     const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
     const temp = uploadTempPath(arena, abs, id) catch
@@ -336,10 +348,10 @@ fn uploadStatus(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.R
 }
 
 fn uploadCancel(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+    const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
-    const raw_id = util.queryParam(request.head.target, "id") orelse
-        return fail(request, arena, .bad_request, "invalid_id");
+    const raw_id = param(arena, request, "id");
+    if (raw_id.len == 0) return fail(request, arena, .bad_request, "invalid_id");
     const id = validUploadId(raw_id) orelse return fail(request, arena, .bad_request, "invalid_id");
     const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
     const temp = uploadTempPath(arena, abs, id) catch
@@ -374,7 +386,7 @@ fn failOffset(request: *http.Server.Request, alloc: Allocator, status: http.Stat
 }
 
 fn archive(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+    const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
     const st = Dir.cwd().statFile(io, abs, .{ .follow_symlinks = false }) catch |err|
@@ -428,7 +440,7 @@ fn walkTar(io: Io, alloc: Allocator, tw: *std.tar.Writer, dir_abs: []const u8, p
                 walkTar(io, alloc, tw, child_abs, sub, depth + 1) catch {};
             },
             .file => {
-                var file = dir.openFile(io, entry.name, .{}) catch continue;
+                var file = dir.openFile(io, entry.name, .{ .follow_symlinks = false }) catch continue;
                 defer file.close(io);
                 const st = file.stat(io) catch continue;
                 var buf: [64 * 1024]u8 = undefined;
@@ -441,7 +453,7 @@ fn walkTar(io: Io, alloc: Allocator, tw: *std.tar.Writer, dir_abs: []const u8, p
 }
 
 fn download(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
-    const rel = normalized(arena, util.queryParam(request.head.target, "path") orelse "") catch
+    const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
 
@@ -450,7 +462,7 @@ fn download(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Reque
         return failMapped(request, arena, err);
     if (st.kind != .file) return fail(request, arena, .bad_request, "not_a_file");
 
-    var file = Dir.cwd().openFile(io, abs, .{ .mode = .read_only }) catch |err|
+    var file = Dir.cwd().openFile(io, abs, .{ .mode = .read_only, .follow_symlinks = false }) catch |err|
         return failMapped(request, arena, err);
     defer file.close(io);
 
@@ -473,7 +485,9 @@ fn download(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Reque
 
     var file_buf: [64 * 1024]u8 = undefined;
     var file_reader = file.reader(io, &file_buf);
-    _ = file_reader.interface.streamRemaining(&body.writer) catch |err| return err;
+    // 必须按 stat 得到的长度发送，否则文件在传输期间变长会多发字节、破坏
+    // Content-Length 和 keep-alive 的帧边界。
+    file_reader.interface.streamExact64(&body.writer, st.size) catch |err| return err;
     return body.end();
 }
 
@@ -609,13 +623,22 @@ fn respondJson(request: *http.Server.Request, alloc: Allocator, status: http.Sta
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     std.json.Stringify.value(value, .{}, &out.writer) catch
-        return fail(request, alloc, .internal_server_error, "json_encode_failed");
+        return respondStatic(request, .internal_server_error, "{\"error\":\"json_encode_failed\"}");
 
     var headers = [_]http.Header{
         .{ .name = "content-type", .value = "application/json; charset=utf-8" },
         .{ .name = "cache-control", .value = "no-store" },
     };
     return request.respond(out.written(), .{ .status = status, .extra_headers = &headers });
+}
+
+/// 不经过 JSON 编码 / 分配器的固定响应，避免 OOM 时递归调用自身。
+fn respondStatic(request: *http.Server.Request, status: http.Status, body: []const u8) !void {
+    var headers = [_]http.Header{
+        .{ .name = "content-type", .value = "application/json; charset=utf-8" },
+        .{ .name = "cache-control", .value = "no-store" },
+    };
+    return request.respond(body, .{ .status = status, .extra_headers = &headers });
 }
 
 fn fail(request: *http.Server.Request, alloc: Allocator, status: http.Status, code: []const u8) anyerror!void {
@@ -657,6 +680,23 @@ test "content disposition encoding" {
     var buf2: [256]u8 = undefined;
     const cjk = contentDisposition(&buf2, "\u{4e2d}\u{6587}.txt");
     try std.testing.expect(std.mem.indexOf(u8, cjk, "filename*=UTF-8''%E4%B8%AD%E6%96%87.txt") != null);
+}
+
+test "upload id validation" {
+    try std.testing.expect(validUploadId("abcdef0123456789") != null);
+    try std.testing.expect(validUploadId("abcdef") == null);
+    try std.testing.expect(validUploadId("zzzzzzzz") == null);
+    try std.testing.expect(validUploadId("0123456789abcdef0123456789abcdef0") == null);
+}
+
+test "upload temp path stays beside the target" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try std.testing.expectEqualStrings(
+        "/srv/work/dir/.myty-upload-abcdef01",
+        try uploadTempPath(a, "/srv/work/dir/file.txt", "abcdef01"),
+    );
 }
 
 test "basename" {

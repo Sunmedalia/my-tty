@@ -38,19 +38,22 @@ var shutting_down = std.atomic.Value(bool).init(false);
 var listen_handle = std.atomic.Value(posix.fd_t).init(-1);
 var active_connections = std.atomic.Value(u32).init(0);
 
+const max_tracked_connections = 4096;
+
 const ConnSlot = struct {
     fd: posix.fd_t = -1,
     last_ns: i96 = 0,
+    waiting_head: bool = false,
 };
 var conn_mutex: Io.Mutex = .init;
-var conn_slots: [128]ConnSlot = @splat(.{});
+var conn_slots: [max_tracked_connections]ConnSlot = @splat(.{});
 
 fn monotonicNs(io: Io) i96 {
     return Io.Clock.awake.now(io).nanoseconds;
 }
 
-/// 标记连接正在等请求头；已在表里就刷新时间。
-fn armIdle(io: Io, fd: posix.fd_t) void {
+/// 登记一条已接受的连接；表满时也返回（该连接只是不参与超时/退出唤醒）。
+fn connAdd(io: Io, fd: posix.fd_t) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
     const ts = monotonicNs(io);
@@ -68,12 +71,43 @@ fn armIdle(io: Io, fd: posix.fd_t) void {
     }
 }
 
+/// 标记连接正在等请求头。
+fn armIdle(io: Io, fd: posix.fd_t) void {
+    conn_mutex.lockUncancelable(io);
+    defer conn_mutex.unlock(io);
+    const ts = monotonicNs(io);
+    for (&conn_slots) |*s| {
+        if (s.fd == fd) {
+            s.waiting_head = true;
+            s.last_ns = ts;
+            return;
+        }
+    }
+    for (&conn_slots) |*s| {
+        if (s.fd < 0) {
+            s.* = .{ .fd = fd, .last_ns = ts, .waiting_head = true };
+            return;
+        }
+    }
+}
+
 /// 请求头已经收到：处理请求期间不再参与空闲清理。
 fn disarmIdle(io: Io, fd: posix.fd_t) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
     for (&conn_slots) |*s| {
-        if (s.fd == fd) s.fd = -1;
+        if (s.fd == fd) s.waiting_head = false;
+    }
+}
+
+fn connRemove(io: Io, fd: posix.fd_t) void {
+    conn_mutex.lockUncancelable(io);
+    defer conn_mutex.unlock(io);
+    for (&conn_slots) |*s| {
+        if (s.fd == fd) {
+            s.* = .{};
+            return;
+        }
     }
 }
 
@@ -82,9 +116,18 @@ fn sweepIdleConnections(io: Io) void {
     defer conn_mutex.unlock(io);
     const ts = monotonicNs(io);
     for (&conn_slots) |*s| {
-        if (s.fd >= 0 and ts - s.last_ns > http_idle_seconds * std.time.ns_per_s) {
+        if (s.fd >= 0 and s.waiting_head and ts - s.last_ns > http_idle_seconds * std.time.ns_per_s) {
             _ = linux.shutdown(s.fd, 2); // 唤醒阻塞在 receiveHead 的线程
         }
+    }
+}
+
+/// 退出时唤醒所有已接受连接（包括正在传文件的），让连接线程尽快返回。
+fn shutdownAllConnections(io: Io) void {
+    conn_mutex.lockUncancelable(io);
+    defer conn_mutex.unlock(io);
+    for (&conn_slots) |*s| {
+        if (s.fd >= 0) _ = linux.shutdown(s.fd, 2);
     }
 }
 
@@ -156,9 +199,11 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
             continue;
         }
 
+        connAdd(io, stream.socket.handle);
         const thread = std.Thread.spawn(.{}, connectionMain, .{
             io, gpa, stream, cfg, &fs, &auth_state, &limiter, &manager,
         }) catch {
+            connRemove(io, stream.socket.handle);
             _ = active_connections.fetchSub(1, .acq_rel);
             stream.close(io);
             continue;
@@ -166,10 +211,26 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
         thread.detach();
     }
 
-    std.debug.print("正在退出：回收 shell…\n", .{});
     shutting_down.store(true, .release);
     if (maint) |t| t.join();
-    manager.shutdown();
+
+    std.debug.print("正在退出：回收 shell…\n", .{});
+    // 先唤醒所有连接线程，再等它们退出。fs/auth_state/limiter/manager 都在
+    // 本函数的栈上，绝不能在线程还在使用时返回（否则就是 use-after-free）。
+    shutdownAllConnections(io);
+    var waited: u32 = 0;
+    while (active_connections.load(.acquire) > 0 and waited < 500) : (waited += 1) {
+        Io.sleep(io, Io.Duration.fromMilliseconds(10), .real) catch break;
+    }
+
+    if (active_connections.load(.acquire) == 0) {
+        manager.shutdown();
+    } else {
+        // 还有连接卡在慢速传输里：不释放会话结构，只杀 shell 后直接退出。
+        manager.killChildren();
+        std.debug.print("仍有 {d} 个连接未退出，直接退出\n", .{active_connections.load(.acquire)});
+        std.process.exit(0);
+    }
     std.debug.print("已退出\n", .{});
 }
 
@@ -181,9 +242,10 @@ fn maintenance(io: Io, auth_state: *auth.Auth, manager: *session.Manager) void {
         if (shutting_down.load(.acquire)) break;
         ticks += 1;
         sweepIdleConnections(io);
-        if (ticks % 60 != 0) continue;
-        auth_state.sweep();
+        // 会话回收每秒一次：pty_idle_minutes=0 也要在 ~1s 内生效；
+        // 登录会话/票据的清理保持每分钟一次即可。
         manager.sweep();
+        if (ticks % 60 == 0) auth_state.sweep();
     }
 }
 
@@ -198,7 +260,7 @@ fn connectionMain(
     manager: *session.Manager,
 ) void {
     defer {
-        disarmIdle(io, stream.socket.handle);
+        connRemove(io, stream.socket.handle);
         _ = active_connections.fetchSub(1, .acq_rel);
         stream.close(io);
     }
