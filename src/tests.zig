@@ -1,0 +1,18 @@
+//! 单元测试入口。
+//!
+//! 只 import 不依赖内嵌前端的模块，因此可以直接：
+//!
+//!     zig test src/tests.zig
+//!
+//! 不需要任何自定义 build step。
+
+const std = @import("std");
+
+test {
+    _ = @import("config.zig");
+    _ = @import("pty.zig");
+    _ = @import("session.zig");
+    _ = @import("util.zig");
+    _ = @import("fsapi.zig");
+    std.testing.refAllDecls(@This());
+}

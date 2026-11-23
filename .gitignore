@@ -1,0 +1,10 @@
+# Zig
+.zig-cache/
+zig-out/
+
+# 本地配置（可能含 token，不要提交）
+my-tty.json
+
+# 杂项
+.DS_Store
+*.log

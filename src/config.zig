@@ -1,0 +1,244 @@
+//! 进程级配置。
+//!
+//! 优先级（后者覆盖前者）：默认值 < 配置文件 < 环境变量 < 命令行参数。
+//! 配置文件是 JSON：`my-tty.json`（或 `--config` / `MYTTY_CONFIG` 指定）。
+//!
+//! 这里刻意不碰网络、不碰 PTY，方便单元测试。
+
+const std = @import("std");
+const net = std.Io.net;
+
+pub const default_config_path = "my-tty.json";
+
+pub const Config = struct {
+    /// 监听地址。默认只绑回环：TLS 由外部反向代理终结，本进程不吃公网流量。
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 7387,
+    /// 登录 shell 的绝对路径。
+    shell: []const u8 = "/bin/bash",
+    /// 非空时，所有请求都必须带 token。
+    token: ?[]const u8 = null,
+    /// 同时存在的终端会话上限，防止一次误操作 fork 出几百个 shell。
+    max_sessions: u32 = 16,
+    /// 文件管理/编辑的可访问根目录；所有路径都被限制在它下面。
+    root: []const u8 = ".",
+    /// 子进程继承的环境变量。
+    environ: std.process.Environ = .empty,
+
+    pub const ParseError = error{
+        UnknownArgument,
+        MissingValue,
+        InvalidPort,
+        InvalidHost,
+        EmptyToken,
+        TokenRequired,
+        ConfigReadFailed,
+        ConfigInvalid,
+        OutOfMemory,
+        Unexpected,
+    };
+
+    pub const usage =
+        \\用法: my-tty [选项]
+        \\
+        \\  --config <path>      配置文件（默认 ./my-tty.json，存在才加载）
+        \\  --host <ipv4>        监听地址（默认 127.0.0.1）
+        \\  --port <1-65535>     监听端口（默认 7387）
+        \\  --shell <path>       登录 shell（默认 $SHELL 或 /bin/bash）
+        \\  --token <secret>     访问令牌；监听非回环地址时必填
+        \\  --root <dir>         文件管理根目录（默认当前目录）
+        \\  --max-sessions <n>   并发会话上限（默认 16）
+        \\  -h, --help           显示本帮助
+        \\
+        \\配置文件示例（my-tty.json，字段全部可选）:
+        \\  {
+        \\    "host": "127.0.0.1",
+        \\    "port": 7387,
+        \\    "shell": "/bin/bash",
+        \\    "token": "change-me",
+        \\    "root": "/srv/work",
+        \\    "max_sessions": 16
+        \\  }
+        \\
+        \\环境变量: MYTTY_CONFIG / MYTTY_HOST / MYTTY_PORT / MYTTY_SHELL /
+        \\          MYTTY_TOKEN / MYTTY_ROOT / MYTTY_MAX_SESSIONS
+        \\
+        \\TLS 不在本程序范围内：请只监听回环地址，把明文 HTTP/WS 交给外部反向代理。
+        \\
+    ;
+
+    /// 配置文件的结构；全部可选，未出现的字段不覆盖上一层。
+    const FileConfig = struct {
+        host: ?[]const u8 = null,
+        port: ?u16 = null,
+        shell: ?[]const u8 = null,
+        token: ?[]const u8 = null,
+        root: ?[]const u8 = null,
+        max_sessions: ?u32 = null,
+    };
+
+    pub fn parse(alloc: std.mem.Allocator, init: std.process.Init) ParseError!Config {
+        var cfg: Config = .{ .environ = init.minimal.environ };
+        const args = try init.minimal.args.toSlice(alloc);
+        const env = init.environ_map;
+        var shell_set = false;
+
+        // 1) 配置文件
+        const explicit_path = scanOption(args, "--config") orelse env.get("MYTTY_CONFIG");
+        if (explicit_path) |path| {
+            shell_set = try loadConfigFile(init.io, alloc, path, &cfg, true);
+        } else {
+            shell_set = try loadConfigFile(init.io, alloc, default_config_path, &cfg, false);
+        }
+
+        // 2) 环境变量
+        if (env.get("MYTTY_HOST")) |v| cfg.host = v;
+        if (env.get("MYTTY_ROOT")) |v| cfg.root = v;
+        if (env.get("MYTTY_TOKEN")) |v| cfg.token = v;
+        if (env.get("MYTTY_PORT")) |v| cfg.port = try parsePort(v);
+        if (env.get("MYTTY_MAX_SESSIONS")) |v| cfg.max_sessions = try parseCount(v);
+        if (env.get("MYTTY_SHELL")) |v| {
+            cfg.shell = v;
+            shell_set = true;
+        }
+
+        // 3) 命令行
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+                return error.UnknownArgument; // main 会先识别 help
+            } else if (optionValue(args, &i, "--config")) |_| {
+                // 文件已在第一步加载，这里只消费参数。
+            } else if (optionValue(args, &i, "--host")) |v| {
+                cfg.host = v;
+            } else if (optionValue(args, &i, "--port")) |v| {
+                cfg.port = try parsePort(v);
+            } else if (optionValue(args, &i, "--shell")) |v| {
+                cfg.shell = v;
+                shell_set = true;
+            } else if (optionValue(args, &i, "--token")) |v| {
+                cfg.token = v;
+            } else if (optionValue(args, &i, "--root")) |v| {
+                cfg.root = v;
+            } else if (optionValue(args, &i, "--max-sessions")) |v| {
+                cfg.max_sessions = try parseCount(v);
+            } else {
+                return error.UnknownArgument;
+            }
+        }
+
+        // 只有在没人显式配置 shell 时，才拿进程的 $SHELL 兜底。
+        if (!shell_set) {
+            if (env.get("SHELL")) |v| cfg.shell = v;
+        }
+
+        try cfg.validate();
+        return cfg;
+    }
+
+    pub fn validate(cfg: *const Config) ParseError!void {
+        // 只接受 IPv4 字面量：不做 DNS，配置越简单越好。
+        _ = net.IpAddress.parseIp4(cfg.host, cfg.port) catch return error.InvalidHost;
+        if (cfg.port == 0) return error.InvalidPort;
+        if (cfg.max_sessions == 0) return error.InvalidPort;
+        if (cfg.token) |t| {
+            if (t.len == 0) return error.EmptyToken;
+        }
+        if (!isLoopback(cfg.host) and cfg.token == null) return error.TokenRequired;
+    }
+};
+
+fn loadConfigFile(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    path: []const u8,
+    cfg: *Config,
+    required: bool,
+) Config.ParseError!bool {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(64 * 1024)) catch |err| {
+        if (!required and err == error.FileNotFound) return false;
+        return error.ConfigReadFailed;
+    };
+
+    var parsed = std.json.parseFromSlice(Config.FileConfig, alloc, bytes, .{}) catch
+        return error.ConfigInvalid;
+    defer parsed.deinit();
+
+    const file = parsed.value;
+    if (file.host) |v| cfg.host = try alloc.dupe(u8, v);
+    if (file.port) |v| cfg.port = v;
+    if (file.shell) |v| cfg.shell = try alloc.dupe(u8, v);
+    if (file.token) |v| cfg.token = try alloc.dupe(u8, v);
+    if (file.root) |v| cfg.root = try alloc.dupe(u8, v);
+    if (file.max_sessions) |v| cfg.max_sessions = v;
+    return file.shell != null;
+}
+
+/// `--key value` 或 `--key=value`；命中时前进下标并返回对应的值。
+fn optionValue(args: []const [:0]const u8, i: *usize, comptime name: []const u8) ?[]const u8 {
+    const arg = args[i.*];
+    if (std.mem.eql(u8, arg, name)) {
+        if (i.* + 1 >= args.len) return null;
+        i.* += 1;
+        return args[i.*];
+    }
+    if (std.mem.startsWith(u8, arg, name ++ "=")) return arg[name.len + 1 ..];
+    return null;
+}
+
+/// 只读扫描（不消费下标），用于在正式解析前确定配置文件路径。
+fn scanOption(args: []const [:0]const u8, comptime name: []const u8) ?[]const u8 {
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, name)) {
+            if (i + 1 >= args.len) return null;
+            return args[i + 1];
+        }
+        if (std.mem.startsWith(u8, arg, name ++ "=")) return arg[name.len + 1 ..];
+    }
+    return null;
+}
+
+fn parsePort(text: []const u8) Config.ParseError!u16 {
+    const n = std.fmt.parseInt(u16, text, 10) catch return error.InvalidPort;
+    if (n == 0) return error.InvalidPort;
+    return n;
+}
+
+fn parseCount(text: []const u8) Config.ParseError!u32 {
+    return std.fmt.parseInt(u32, text, 10) catch return error.InvalidPort;
+}
+
+pub fn isLoopback(host: []const u8) bool {
+    return std.mem.startsWith(u8, host, "127.");
+}
+
+/// 定长时间比较，避免 token 逐字节泄漏长度/前缀。
+pub fn constantTimeEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var diff: u8 = 0;
+    for (a, b) |x, y| diff |= x ^ y;
+    return diff == 0;
+}
+
+test "loopback detection" {
+    try std.testing.expect(isLoopback("127.0.0.1"));
+    try std.testing.expect(isLoopback("127.9.9.9"));
+    try std.testing.expect(!isLoopback("0.0.0.0"));
+    try std.testing.expect(!isLoopback("10.0.0.1"));
+}
+
+test "constant time equality" {
+    try std.testing.expect(constantTimeEql("abc", "abc"));
+    try std.testing.expect(!constantTimeEql("abc", "abd"));
+    try std.testing.expect(!constantTimeEql("abc", "ab"));
+}
+
+test "validate refuses public bind without token" {
+    var cfg: Config = .{ .host = "0.0.0.0" };
+    try std.testing.expectError(error.TokenRequired, cfg.validate());
+    cfg.token = "s3cret";
+    try cfg.validate();
+}

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>my-tty</title>
+    <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="bar">
+        <span class="brand">my-tty</span>
+        <span id="status"></span>
+        <span class="spacer"></span>
+        <span id="hint">Ctrl+Shift+C 复制 · Ctrl+Shift+V 粘贴</span>
+        <button id="toggle-files" type="button">文件</button>
+        <button id="add-pane" type="button">+ 分屏</button>
+      </header>
+
+      <div id="body">
+        <aside id="files" hidden>
+          <div class="files-head">
+            <div id="crumb"></div>
+            <span class="spacer"></span>
+            <button id="files-refresh" class="icon" type="button" title="刷新">⟳</button>
+            <button id="files-new-file" class="icon" type="button" title="新建文件">＋</button>
+            <button id="files-new-dir" class="icon" type="button" title="新建目录">▣</button>
+          </div>
+          <ul id="file-list"></ul>
+          <p id="notice"></p>
+        </aside>
+
+        <main id="workspace" data-count="0"></main>
+      </div>
+    </div>
+
+    <div id="editor-overlay" hidden>
+      <section class="editor" role="dialog" aria-modal="true">
+        <header>
+          <span id="editor-path"></span>
+          <span id="editor-state"></span>
+          <span class="spacer"></span>
+          <button id="editor-save" type="button">保存</button>
+          <button id="editor-close" type="button">关闭</button>
+        </header>
+        <textarea id="editor" spellcheck="false" autocomplete="off"></textarea>
+        <footer>Ctrl+S 保存 · Esc 关闭</footer>
+      </section>
+    </div>
+
+    <script src="/vendor/xterm/xterm.js"></script>
+    <script src="/vendor/xterm/addon-fit.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
