@@ -1,0 +1,35 @@
+[Unit]
+Description=my-tty web terminal
+Documentation=https://github.com/illusoryrain/my-tty
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=my-tty
+Group=my-tty
+WorkingDirectory=/srv/work
+
+# 密码不要写在 ExecStart 里（会出现在 ps 和 journal 中），放配置文件：
+#   /etc/my-tty/my-tty.json，权限 0640 root:my-tty
+ExecStartPre=/usr/local/bin/my-tty --config /etc/my-tty/my-tty.json --check-config
+ExecStart=/usr/local/bin/my-tty --config /etc/my-tty/my-tty.json
+
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+# 只给主进程发 SIGTERM，让它自己回收各个 PTY；超时后再整组 SIGKILL。
+KillMode=mixed
+LimitNOFILE=65536
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=my-tty
+
+# 注意：本服务对外提供的是一个能执行任意命令的 shell。
+# NoNewPrivileges / ProtectSystem=strict / PrivateTmp 之类的 sandbox 会直接
+# 限制终端里的正常使用（sudo、写 /tmp、构建等），所以这里默认不开。
+# 真要收紧，请先确认终端里的日常工作不需要被限制。
+
+[Install]
+WantedBy=multi-user.target
