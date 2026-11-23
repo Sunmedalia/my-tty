@@ -391,7 +391,19 @@
     updateSummary();
   }
 
-  // Ctrl/Cmd+Shift+C 复制，Ctrl/Cmd+Shift+V 粘贴；普通 Ctrl+C 照旧发给 shell。
+  // xterm 的 attachCustomKeyEventHandler 返回 false 只是让 xterm 不再处理，
+  // 不会阻止浏览器默认行为。Ctrl+Shift+C 在 Chrome/Edge 里是 DevTools 的
+  // “检查元素”，所以必须自己 preventDefault，否则快捷键照样被浏览器截走。
+  function consumeKey(event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  // 复制/粘贴：
+  //   Ctrl/Cmd+C  有选区 → 复制；没有选区 → 原样交给 shell（Ctrl+C = SIGINT）
+  //   Ctrl+Insert 复制；Ctrl/Cmd+Shift+C 也复制（并挡掉 Chrome 的 DevTools 快捷键）
+  //   Ctrl/Cmd+V、Ctrl+Shift+V、Shift+Insert → 不拦，交给浏览器原生 paste 事件，
+  //   xterm 自己会处理 bracketed paste，也不需要 clipboard-read 权限。
   function handleTermKey(event, pane) {
     if (event.type !== "keydown") return true;
     if (event.key === "Escape") {
@@ -406,17 +418,34 @@
       }
     }
     const mod = event.ctrlKey || event.metaKey;
-    if (mod && event.shiftKey && event.code === "KeyC") {
+
+    const explicitCopy =
+      (mod && event.shiftKey && event.code === "KeyC") ||
+      (mod && !event.shiftKey && event.code === "Insert");
+    if (explicitCopy) {
+      consumeKey(event);
       copyText(pane.term.getSelection());
       return false;
     }
-    if (mod && event.shiftKey && event.code === "KeyV") {
-      readClipboard().then((text) => {
-        if (text) sendInput(pane, text);
-      });
-      return false;
+
+    if (mod && !event.shiftKey && !event.altKey && event.code === "KeyC") {
+      const selection = pane.term.getSelection();
+      if (selection) {
+        consumeKey(event);
+        copyText(selection);
+        // 复制后清掉选区：这样下一次 Ctrl+C 就是中断，而不是重复复制。
+        pane.term.clearSelection();
+        return false;
+      }
+      // 没有选区：Ctrl+C 仍然作为 ^C 发给 shell；macOS 的 Cmd+C 则什么都不做。
+      return event.ctrlKey;
     }
+
+    if (mod && event.code === "KeyV") return false;
+    if (event.shiftKey && !mod && !event.altKey && event.code === "Insert") return false;
+
     if (mod && event.shiftKey && event.code === "KeyF") {
+      consumeKey(event);
       openFind();
       return false;
     }
@@ -1069,13 +1098,6 @@
       document.execCommand("copy");
     } catch (_) {}
     ta.remove();
-  }
-
-  function readClipboard() {
-    if (navigator.clipboard && navigator.clipboard.readText) {
-      return navigator.clipboard.readText().catch(() => Promise.resolve(prompt("粘贴内容") || ""));
-    }
-    return Promise.resolve(prompt("当前环境不支持读取剪贴板，请手动粘贴：") || "");
   }
 
   // ---------------------------------------------------------- 移动按键条

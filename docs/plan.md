@@ -282,7 +282,8 @@ my-tty/
 - [x] 上传进度/取消、4 MiB 分片与断点续传、目录 tar 下载、编辑器行号/Tab/离开提示。
 - [x] CI（格式/构建/单测/smoke/浏览器）与 `tests/browser/` 回归脚本。
 - [x] `--check-config`、`my-tty.example.json`、`scripts/build-release.sh`（strip）。
-- [ ] 复制/粘贴快捷键在 DOM 渲染下的手工验收（Chrome/Firefox）。
+- [x] 复制/粘贴快捷键：`Ctrl+C` 有选区复制/无选区中断，`Ctrl+V`/`Ctrl+Shift+V`/
+      `Shift+Insert` 原生粘贴，`Ctrl+Shift+C` 挡掉 DevTools 快捷键（浏览器回归覆盖）。
 - [ ] README 完整化；`docs/research.md` 归档。
 - [ ] 二进制体积与启动时间记录。
 
@@ -297,7 +298,7 @@ zig test src/tests.zig
 浏览器自动化（本机已验证）：headless Chromium 下断言 1/2/3/4 屏尺寸、
 两个 pane 的输出互不串流、文件编辑保存落盘、页面无 console error。
 
-仍需人工确认：DOM 终端里的鼠标选择/复制、`Ctrl+C` 不被前端吞、
+仍需人工确认：DOM 终端里的鼠标选择体验、
 中文/多行粘贴、窗口缩放后 `stty size` 与可见行列一致。
 
 ---

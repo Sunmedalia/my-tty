@@ -87,6 +87,16 @@ HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 分栏可以拖拽；pane 右上角可最大化；`Ctrl+Shift+F` 搜索，`Ctrl+Shift+±` 调整字号，
 `F3` 下一个匹配。移动端会显示 Esc/Tab/Ctrl/方向键/^C/^D/^L 按键条。
 
+复制/粘贴是终端语义：
+
+- `Ctrl+C`：**有选区时复制，没有选区时发给 shell 作为中断（SIGINT）**；复制后会清掉选区，
+  所以下一次 `Ctrl+C` 就是中断。
+- `Ctrl+V`、`Ctrl+Shift+V`、`Shift+Insert`：粘贴，走浏览器原生 paste 事件（xterm 处理
+  bracketed paste），不需要申请剪贴板读取权限。
+- `Ctrl+Insert`、`Ctrl+Shift+C`：始终复制；后者还会 `preventDefault`，避免被
+  Chrome/Edge 的 DevTools“检查元素”快捷键抢走（DevTools 仍可从菜单打开）。
+- macOS 上 `Cmd+C` / `Cmd+V` 同理；没有选区时 `Cmd+C` 不会发送中断。
+
 ## 安全边界
 
 - 默认只监听 `127.0.0.1`；除登录端点本身外，**所有 `/api/*` 与 WebSocket 都必须携带有效会话**，否则一律 401。
