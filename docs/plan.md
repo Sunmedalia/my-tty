@@ -266,6 +266,8 @@ my-tty/
 ### P3 收尾
 
 - [x] DOM 渲染底部裁切：去掉自定义 lineHeight，fit 后按 pane 真实边界校验并收缩行列。
+- [x] TUI 图形完整性：内置 JetBrains Mono（OFL），并在创建 Terminal 前 await 字体加载，
+      方块/制表符填满单元格（DejaVu 会在 `█` 与竖线处留下 1–2px 缝隙）。
 - [ ] 复制/粘贴快捷键在 DOM 渲染下的手工验收（Chrome/Firefox）。
 - [ ] README 完整化；`docs/research.md` 归档。
 - [ ] 二进制体积与启动时间记录。

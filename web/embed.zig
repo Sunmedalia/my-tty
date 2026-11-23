@@ -9,3 +9,4 @@ pub const style_css = @embedFile("style.css");
 pub const xterm_css = @embedFile("vendor/xterm/xterm.css");
 pub const xterm_js = @embedFile("vendor/xterm/xterm.js");
 pub const addon_fit_js = @embedFile("vendor/xterm/addon-fit.js");
+pub const jetbrains_mono_ttf = @embedFile("vendor/fonts/JetBrainsMono-Regular.ttf");

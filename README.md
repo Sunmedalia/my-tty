@@ -91,6 +91,10 @@ TLS 不属于本项目：请让进程只监听回环地址，把明文 HTTP/WS �
 的构建产物（MIT，许可证同目录）。xterm 6 默认就是 DOM renderer，因此文本可以
 用浏览器原生方式选择与复制；没有引入 WebGL/Canvas addon。
 
+`web/vendor/fonts/` 内置 JetBrains Mono v2.304（OFL 1.1）。DOM 渲染器只能靠
+字体绘制方框/方块字符，系统字体（如 DejaVu）会让 `█` 和边框出现缝隙；
+内置字体在创建终端前完成加载，TUI 的边框与色块才能连续。
+
 ## 验证
 
 ```sh

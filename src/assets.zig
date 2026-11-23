@@ -60,6 +60,12 @@ pub const all = [_]Asset{
         .body = web.addon_fit_js,
         .cache_control = "public, max-age=86400",
     },
+    .{
+        .path = "/vendor/fonts/JetBrainsMono-Regular.ttf",
+        .mime = "font/ttf",
+        .body = web.jetbrains_mono_ttf,
+        .cache_control = "public, max-age=86400",
+    },
 };
 
 pub fn find(path: []const u8) ?*const Asset {

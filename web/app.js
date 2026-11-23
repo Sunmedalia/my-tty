@@ -60,7 +60,7 @@
       cursorBlink: true,
       cursorStyle: "block",
       fontFamily:
-        'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+        '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
       fontSize: 14,
       scrollback: 5000,
       allowProposedApi: false,
@@ -622,10 +622,16 @@
     loginError.textContent = "";
   }
 
-  function startApp() {
+  async function startApp() {
     hideLogin();
     if (started) return;
     started = true;
+    // 终端字体必须在创建 Terminal 之前就绪，否则 xterm 会按回退字体算字宽，
+    // 之后字体加载完也不会重算 letter-spacing，方框/方块字符会出现缝隙。
+    try {
+      await document.fonts.load('14px "JetBrains Mono"');
+      await document.fonts.ready;
+    } catch (_) {}
     if (panes.length === 0) createPane();
     else layout();
     refreshFiles();
