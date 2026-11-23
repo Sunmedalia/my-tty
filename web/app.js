@@ -43,6 +43,12 @@
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   const wsBase = `${scheme}//${location.host}/ws`;
 
+  // 触摸设备把可打印字符统一交给浏览器的 input 事件：xterm 的 keydown/keypress
+  // 和 input 各发一次，是手机端 ls → llss 的根因。桌面（细指针）完全不受影响。
+  const coarsePointer =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(pointer: coarse)").matches;
+
   const panes = [];
   let activePane = null;
   let currentDir = "";
@@ -99,49 +105,39 @@
 
     // xterm 6.0 用 _keyDownSeen 去重：composed 的 insertText 只要该标记为真
     // 就会被忽略。Safari/输入法会出现 keydown 是 229/Process、字符只能靠随后的
-    // input 送达的情况；但移动端浏览器又会在 keydown 已经发出字符后，再派发一次
-    // composed insertText——无条件清标记会让同一个字符发两遍（ls → llss）。
+    // input 送达；移动端浏览器又可能在 keydown/keypress 已经发出字符后，再派发
+    // 一次 composed insertText——无条件清标记会让同一个字符发两遍（ls → llss）。
     //
-    // 所以只记录“这次 keydown 是否可能已经发出了这个字符”。只有 keydown 没有
-    // 对应字符（229/Process/组合输入/带 Ctrl/Alt/Meta）时，才清标记让 input 补发；
-    // 普通按键仍交给 xterm 原本的去重逻辑。桌面 Chrome/Safari 的正常按键不会
-    // 产生 input 事件，这段逻辑不会改变它们的行为。
+    // 不猜“哪个键发出了字符”，而是记录 xterm 在键盘事件里实际发出的数据：
+    // 只有 input 的数据与刚才键盘路径发出的不一致时，才清标记让 input 补发。
+    // term.onData 是所有发送的唯一出口，keydown/keypress/input 都会经过它。
     const helperTextarea = term.textarea;
     if (helperTextarea && term._core) {
-      let lastKeyChar = null;
-      let lastKeyAt = 0;
+      let keyEventActive = false;
+      let sentThisKeyEvent = false;
+      let lastKeySent = null;
+      let lastKeySentAt = 0;
+      let swallowInput = false;
+      let lastBeforeInputData = null;
+      let lastBeforeInputAt = 0;
 
-      // 有些移动键盘的 keydown 给 key="Unidentified"，但 keyCode 仍是字母/
-      // 数字，xterm 会按 keyCode 正常发出；这里补出对应字符，避免误判成 IME。
-      const printableKey = (event) => {
-        if (event.key && event.key.length === 1) return event.key;
-        const code = event.keyCode;
-        if (code >= 65 && code <= 90) {
-          return String.fromCharCode(event.shiftKey ? code : code + 32);
-        }
-        if (code >= 48 && code <= 57) {
-          return event.shiftKey
-            ? ")!@#$%^&*("[code - 48]
-            : String.fromCharCode(code);
-        }
-        if (code === 32) return " ";
-        return null;
+      term.onData((data) => {
+        if (!keyEventActive) return;
+        sentThisKeyEvent = true;
+        lastKeySent = data;
+        lastKeySentAt = performance.now();
+      });
+
+      const beginKey = () => {
+        keyEventActive = true;
+        sentThisKeyEvent = false;
       };
-
-      const trackKeyDown = (event) => {
-        if (event.target !== helperTextarea) return;
-        if (
-          event.isComposing ||
-          event.keyCode === 229 ||
-          event.ctrlKey ||
-          event.altKey ||
-          event.metaKey
-        ) {
-          lastKeyChar = null;
-          return;
+      const endKey = (event) => {
+        keyEventActive = false;
+        // keydown 已经发过字符时压掉紧随其后的 keypress，避免第二条键盘路径重复。
+        if (event.type === "keydown" && sentThisKeyEvent) {
+          term._core._keyDownHandled = true;
         }
-        lastKeyChar = printableKey(event);
-        lastKeyAt = performance.now();
       };
 
       const letInputThrough = (event) => {
@@ -149,24 +145,83 @@
         if (!event.composed || !event.data) return;
         if (event.inputType !== "insertText" || event.isComposing) return;
 
-        const sameAsKeydown =
-          lastKeyChar !== null &&
-          event.data === lastKeyChar &&
-          performance.now() - lastKeyAt < 500;
-        lastKeyChar = null;
+        const now = performance.now();
 
-        // keydown 已经把同一个字符发出去了；保持 _keyDownSeen，让 input 被忽略。
-        if (sameAsKeydown) return;
+        if (event.type === "beforeinput") {
+          lastBeforeInputData = event.data;
+          lastBeforeInputAt = now;
+        } else if (lastBeforeInputData === event.data && now - lastBeforeInputAt < 100) {
+          // 同一个数据已经由 beforeinput 处理过，input 只做兜底，不能重复决定。
+          lastBeforeInputData = null;
+          return;
+        }
+
+        keyEventActive = false;
+        const alreadySent =
+          lastKeySent !== null &&
+          event.data === lastKeySent &&
+          now - lastKeySentAt < 500;
+        lastKeySent = null;
+
+        if (alreadySent) {
+          // 键盘路径已经发过：阻止 input 再发一次。极少数移动浏览器即使取消
+          // beforeinput 仍会派发 input，下面的捕获监听会把它挡住。
+          if (event.cancelable) event.preventDefault();
+          swallowInput = true;
+          setTimeout(() => {
+            swallowInput = false;
+          }, 0);
+          return;
+        }
         term._core._keyDownSeen = false;
       };
 
-      termEl.addEventListener("keydown", trackKeyDown, true);
-      // beforeinput 是最早的时机；不支持它的旧 WebKit 才退回 input 捕获阶段
-      // （input 在 xterm 自己的 textarea 监听器之前执行）。
+      const swallowIfNeeded = (event) => {
+        if (!swallowInput) return;
+        swallowInput = false;
+        event.stopPropagation();
+      };
+
+      termEl.addEventListener("keydown", beginKey, true);
+      termEl.addEventListener("keypress", beginKey, true);
+      termEl.addEventListener("keydown", endKey);
+      termEl.addEventListener("keypress", endKey);
+      // beforeinput 是最早的时机；input 捕获阶段始终保留兜底（在 xterm 自己的
+      // textarea 监听器之前执行），并用 lastBeforeInputData 避免同一事件处理两次。
       if ("onbeforeinput" in helperTextarea) {
         helperTextarea.addEventListener("beforeinput", letInputThrough);
-      } else {
-        termEl.addEventListener("input", letInputThrough, true);
+      }
+      termEl.addEventListener("input", letInputThrough, true);
+      termEl.addEventListener("input", swallowIfNeeded, true);
+
+      // 排查用：URL 加 ?debug-input=1 时把原始事件打到控制台，默认不输出。
+      if (new URLSearchParams(location.search).has("debug-input")) {
+        const types = [
+          "keydown",
+          "keypress",
+          "beforeinput",
+          "input",
+          "compositionstart",
+          "compositionend",
+        ];
+        for (const type of types) {
+          helperTextarea.addEventListener(
+            type,
+            (event) => {
+              console.log("[my-tty input]", type, {
+                key: event.key,
+                code: event.code,
+                keyCode: event.keyCode,
+                charCode: event.charCode,
+                data: event.data,
+                inputType: event.inputType,
+                composed: event.composed,
+                isComposing: event.isComposing,
+              });
+            },
+            true
+          );
+        }
       }
     }
 
@@ -521,6 +576,20 @@
     event.stopPropagation();
   }
 
+  // 可打印字符（不含 Ctrl/Alt/Meta、组合输入和功能键）。
+  function isPrintableKeyEvent(event) {
+    if (event.ctrlKey || event.altKey || event.metaKey) return false;
+    if (event.isComposing || event.keyCode === 229) return false;
+    if (event.key && event.key.length === 1) return true;
+    const code = event.keyCode || event.charCode;
+    return (
+      (code >= 48 && code <= 57) ||
+      (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122) ||
+      code === 32
+    );
+  }
+
   // 复制/粘贴只处理 Ctrl（Linux/Windows）：
   //   Ctrl+C  有选区 → 复制；没有选区 → 原样交给 shell（SIGINT）
   //   Ctrl+Insert / Ctrl+Shift+C → 复制（后者挡掉 Chrome 的 DevTools 快捷键）
@@ -529,6 +598,11 @@
   // macOS 的 Cmd+C / Cmd+V 不在这里处理：xterm 本来就不会拦截它们，浏览器的
   // 原生 copy/paste 事件会照常触发，由 xterm 自己完成复制和粘贴。
   function handleTermKey(event, pane) {
+    // 触摸设备：可打印字符只走 input 路径；keydown/keypress 交给浏览器默认行为
+    // 产生 input，避免 xterm 在键盘事件里先发一次、input 再发一次。
+    if (coarsePointer && event.type !== "keyup" && isPrintableKeyEvent(event)) {
+      return false;
+    }
     if (event.type !== "keydown") return true;
     if (event.key === "Escape") {
       if (workspace.classList.contains("maximized")) {
