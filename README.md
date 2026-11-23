@@ -95,7 +95,10 @@ HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
   bracketed paste），不需要申请剪贴板读取权限。
 - `Ctrl+Insert`、`Ctrl+Shift+C`：始终复制；后者还会 `preventDefault`，避免被
   Chrome/Edge 的 DevTools“检查元素”快捷键抢走（DevTools 仍可从菜单打开）。
-- macOS 上 `Cmd+C` / `Cmd+V` 同理；没有选区时 `Cmd+C` 不会发送中断。
+- 以上只绑定 Ctrl；macOS 的 `Cmd+C` / `Cmd+V` 由 xterm 走浏览器原生 copy/paste 事件，
+  前端不再单独判断 `metaKey`。
+- 顶栏的 `^C` 按钮直接向当前 pane 发送 `0x03`，用于 RDP/远程桌面吞掉 Ctrl、或不想用
+  键盘的场景；移动端按键条里也有同样的 `^C`。
 
 ## 安全边界
 

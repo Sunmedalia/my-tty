@@ -30,14 +30,27 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   assert(before === "14px" && after === "15px", `font size ${before} -> ${after}`);
   await page.click("#font-dec");
 
+  // 顶栏 ^C：不依赖键盘 Ctrl（RDP 等环境）
+  await page.locator(".pane-term").click();
+  await page.keyboard.type("sleep 30\r");
+  await page.waitForTimeout(400);
+  await page.click("#send-interrupt");
+  await page.waitForTimeout(300);
+  await page.keyboard.type("echo INTERRUPT_BTN_OK\r");
+  await page.waitForTimeout(500);
+  assert((await page.locator(".xterm-rows").innerText()).includes("INTERRUPT_BTN_OK"), "^C button interrupts shell");
+
   await page.locator(".pane-term").click();
   await page.keyboard.type("printf 'ALPHA\\nBETA\\nALPHA\\n'\r");
   await page.waitForTimeout(500);
   await page.keyboard.press("Control+Shift+F");
   await page.waitForSelector("#find-bar:not([hidden])");
   await page.fill("#find-input", "ALPHA");
-  await page.waitForTimeout(500);
-  assert((await page.evaluate(() => document.querySelectorAll(".xterm-selection div").length)) > 0, "search highlights");
+  await page.waitForFunction(
+    () => document.querySelectorAll(".xterm-selection div").length > 0,
+    null,
+    { timeout: 5000 }
+  );
   await page.keyboard.press("Escape");
 
   await page.locator(".pane").first().hover();

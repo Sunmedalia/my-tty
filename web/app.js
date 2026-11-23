@@ -30,6 +30,7 @@
   const findBar = document.getElementById("find-bar");
   const findInput = document.getElementById("find-input");
   const findCount = document.getElementById("find-count");
+  const interruptBtn = document.getElementById("send-interrupt");
   const fontDecBtn = document.getElementById("font-dec");
   const fontIncBtn = document.getElementById("font-inc");
   const keysBar = document.getElementById("keys");
@@ -399,11 +400,13 @@
     event.stopPropagation();
   }
 
-  // 复制/粘贴：
-  //   Ctrl/Cmd+C  有选区 → 复制；没有选区 → 原样交给 shell（Ctrl+C = SIGINT）
-  //   Ctrl+Insert 复制；Ctrl/Cmd+Shift+C 也复制（并挡掉 Chrome 的 DevTools 快捷键）
-  //   Ctrl/Cmd+V、Ctrl+Shift+V、Shift+Insert → 不拦，交给浏览器原生 paste 事件，
-  //   xterm 自己会处理 bracketed paste，也不需要 clipboard-read 权限。
+  // 复制/粘贴只处理 Ctrl（Linux/Windows）：
+  //   Ctrl+C  有选区 → 复制；没有选区 → 原样交给 shell（SIGINT）
+  //   Ctrl+Insert / Ctrl+Shift+C → 复制（后者挡掉 Chrome 的 DevTools 快捷键）
+  //   Ctrl+V / Ctrl+Shift+V / Shift+Insert → 不拦，交给浏览器原生 paste 事件，
+  //   xterm 自己处理 bracketed paste，也不需要 clipboard-read 权限。
+  // macOS 的 Cmd+C / Cmd+V 不在这里处理：xterm 本来就不会拦截它们，浏览器的
+  // 原生 copy/paste 事件会照常触发，由 xterm 自己完成复制和粘贴。
   function handleTermKey(event, pane) {
     if (event.type !== "keydown") return true;
     if (event.key === "Escape") {
@@ -417,18 +420,17 @@
         return false;
       }
     }
-    const mod = event.ctrlKey || event.metaKey;
 
     const explicitCopy =
-      (mod && event.shiftKey && event.code === "KeyC") ||
-      (mod && !event.shiftKey && event.code === "Insert");
+      (event.ctrlKey && event.shiftKey && event.code === "KeyC") ||
+      (event.ctrlKey && !event.shiftKey && event.code === "Insert");
     if (explicitCopy) {
       consumeKey(event);
       copyText(pane.term.getSelection());
       return false;
     }
 
-    if (mod && !event.shiftKey && !event.altKey && event.code === "KeyC") {
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && event.code === "KeyC") {
       const selection = pane.term.getSelection();
       if (selection) {
         consumeKey(event);
@@ -437,14 +439,14 @@
         pane.term.clearSelection();
         return false;
       }
-      // 没有选区：Ctrl+C 仍然作为 ^C 发给 shell；macOS 的 Cmd+C 则什么都不做。
-      return event.ctrlKey;
+      // 没有选区：交回 xterm，正常发送 ^C。
+      return true;
     }
 
-    if (mod && event.code === "KeyV") return false;
-    if (event.shiftKey && !mod && !event.altKey && event.code === "Insert") return false;
+    if (event.ctrlKey && event.code === "KeyV") return false;
+    if (event.shiftKey && !event.ctrlKey && !event.altKey && event.code === "Insert") return false;
 
-    if (mod && event.shiftKey && event.code === "KeyF") {
+    if (event.ctrlKey && event.shiftKey && event.code === "KeyF") {
       consumeKey(event);
       openFind();
       return false;
@@ -891,6 +893,7 @@
   document.getElementById("find-next").addEventListener("click", () => runFind(false, false));
   document.getElementById("find-close").addEventListener("click", closeFind);
 
+  interruptBtn.addEventListener("click", () => sendKey("ctrlc"));
   fontDecBtn.addEventListener("click", () => setFontSize(fontsize - 1));
   fontIncBtn.addEventListener("click", () => setFontSize(fontsize + 1));
 
@@ -1047,9 +1050,17 @@
       return;
     }
     const options = { caseSensitive: false, incremental };
-    const found = backwards
+    let found = backwards
       ? pane.search.findPrevious(query, options)
       : pane.search.findNext(query, options);
+    if (!found && incremental) {
+      // 输入时是增量查找（从上次结果继续）；没找到就从缓冲区头/尾再兜底一次，
+      // 否则光标后方的历史输出会看起来像“没有结果”。
+      const wrap = { caseSensitive: false };
+      found = backwards
+        ? pane.search.findPrevious(query, wrap)
+        : pane.search.findNext(query, wrap);
+    }
     findCount.textContent = found ? "" : incremental ? "" : "无结果";
   }
 
