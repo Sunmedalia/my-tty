@@ -3,7 +3,7 @@
 单二进制的 Web 终端：Zig 提供 HTTP/WebSocket 与 Linux PTY，浏览器用 xterm.js
 的 **DOM 渲染器**显示终端。静态资源在编译期打进二进制，运行时不需要 Node/npm。
 
-当前状态（详见 `docs/plan.md`）：
+当前状态：
 
 | 能力 | 状态 |
 |---|---|
