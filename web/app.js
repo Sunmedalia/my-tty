@@ -104,11 +104,16 @@
     // 已经被 xterm preventDefault，不会产生 input 事件，所以不会重复发送。
     const helperTextarea = term.textarea;
     if (helperTextarea && term._core) {
-      helperTextarea.addEventListener("beforeinput", (event) => {
+      const letInputThrough = (event) => {
+        if (event.target !== helperTextarea) return;
         if (!event.composed || !event.data) return;
         if (event.inputType !== "insertText" || event.isComposing) return;
         term._core._keyDownSeen = false;
-      });
+      };
+      // beforeinput 是最早的时机；input 的捕获阶段则保证在 xterm 自己的
+      // textarea 监听器之前执行，兼容不派发 beforeinput 的旧 WebKit。
+      helperTextarea.addEventListener("beforeinput", letInputThrough);
+      termEl.addEventListener("input", letInputThrough, true);
     }
 
     const pane = {
