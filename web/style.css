@@ -264,22 +264,45 @@ button.icon {
   border-color: #2f3a55;
 }
 
+/* 悬浮标题栏：不占布局高度，悬停/聚焦/出错时浮出。 */
 .pane-bar {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 3;
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-  height: 24px;
-  padding: 0 6px;
-  background: #141821;
-  border-bottom: 1px solid #1d2331;
+  gap: 5px;
+  max-width: calc(100% - 12px);
+  height: 22px;
+  padding: 0 4px 0 7px;
+  background: rgb(20 24 33 / 0.92);
+  border: 1px solid #2a3244;
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.35);
   font-size: 11px;
   color: var(--dim);
   user-select: none;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  pointer-events: none;
 }
 
-.pane-bar .pane-spacer {
-  flex: 1 1 auto;
+.pane:hover .pane-bar,
+.pane:focus-within .pane-bar,
+.pane-bar.attention {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .pane.active .pane-bar {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
 }
 
 .pane-dot {
@@ -333,7 +356,7 @@ button.icon {
 .pane-term {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 4px 6px;
+  padding: 6px 8px;
   overflow: hidden;
 }
 

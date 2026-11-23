@@ -46,13 +46,13 @@
       <div class="pane-bar">
         <span class="pane-dot"></span>
         <span class="pane-status">连接中…</span>
-        <span class="pane-spacer"></span>
         <button class="pane-close" type="button" title="关闭此分屏">✕</button>
       </div>
       <div class="pane-term"></div>`;
     workspace.appendChild(el);
 
     const termEl = el.querySelector(".pane-term");
+    const bar = el.querySelector(".pane-bar");
     const status = el.querySelector(".pane-status");
     const dot = el.querySelector(".pane-dot");
 
@@ -72,7 +72,7 @@
     term.loadAddon(fit);
     term.open(termEl);
 
-    const pane = { el, term, fit, status, dot, ws: null, alive: false, reconnect: null };
+    const pane = { el, term, fit, bar, status, dot, ws: null, alive: false, reconnect: null };
     panes.push(pane);
 
     term.attachCustomKeyEventHandler((event) => handleTermKey(event, pane));
@@ -192,6 +192,8 @@
     pane.status.textContent = text;
     pane.status.className = `pane-status ${kind || ""}`;
     pane.dot.className = `pane-dot ${kind || ""}`;
+    // 悬浮标题栏默认隐藏；出错时常驻，方便点击重连/关闭。
+    pane.bar.classList.toggle("attention", kind === "error");
     updateSummary();
   }
 
