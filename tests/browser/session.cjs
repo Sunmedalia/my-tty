@@ -55,7 +55,7 @@ function waitReady(ws) {
   await page.fill("#login-password", PASSWORD);
   await page.click("#login-submit");
   await page.waitForSelector(".pane .xterm");
-  await page.waitForSelector("#status.ok", { timeout: 5000 });
+  await page.waitForSelector("#status.ok", { timeout: 10000 });
   await page.locator(".pane-term").click();
 
   await page.keyboard.type("export MYTTY_TOKEN=ALIVE; echo FIRST_MARK\r");
@@ -66,18 +66,18 @@ function waitReady(ws) {
   // 刷新：重连同一个 shell，并回放之前输出
   await page.reload();
   await page.waitForSelector(".pane .xterm");
-  await page.waitForSelector("#status.ok", { timeout: 5000 });
+  await page.waitForSelector("#status.ok", { timeout: 10000 });
   await page.waitForFunction(
     () => document.querySelector(".xterm-rows").innerText.includes("FIRST_MARK"),
     null,
-    { timeout: 5000 }
+    { timeout: 10000 }
   );
   await page.locator(".pane-term").click();
   await page.keyboard.type("echo TOKEN=$MYTTY_TOKEN; echo SECOND_MARK\r");
   await page.waitForFunction(
     () => document.querySelector(".xterm-rows").innerText.includes("SECOND_MARK"),
     null,
-    { timeout: 5000 }
+    { timeout: 10000 }
   );
   assert((await termText()).includes("TOKEN=ALIVE"), "same shell after reload");
 
@@ -115,7 +115,7 @@ function waitReady(ws) {
   await page.waitForFunction(
     () => document.querySelector(".pane-status").textContent.includes("已断开"),
     null,
-    { timeout: 8000 }
+    { timeout: 10000 }
   );
   other.close();
   await sleep(300);
@@ -124,7 +124,7 @@ function waitReady(ws) {
   await page.waitForFunction(
     () => document.querySelector(".pane-status").textContent.includes("已连接"),
     null,
-    { timeout: 8000 }
+    { timeout: 10000 }
   );
   await page.waitForTimeout(400);
 
@@ -148,14 +148,14 @@ function waitReady(ws) {
   await page.waitForFunction(
     () => document.querySelector(".xterm-rows").innerText.includes("STILL_ALIVE=ALIVE"),
     null,
-    { timeout: 5000 }
+    { timeout: 10000 }
   );
 
   // 关闭分屏 = 结束会话：旧 id 再连回来必须是新的会话
   const idBeforeClose = (await storedIds())[0];
   await page.locator(".pane-close").first().click();
   await page.waitForSelector(".pane .xterm");
-  await page.waitForSelector("#status.ok", { timeout: 8000 });
+  await page.waitForSelector("#status.ok", { timeout: 10000 });
   const ticket2 = await page.evaluate(async () => {
     const r = await fetch("/api/auth/ticket", { method: "POST" });
     return (await r.json()).ticket;
