@@ -248,7 +248,11 @@ pub fn cookieFromRequest(request: *const http.Server.Request) ?[]const u8 {
 
 /// 反向代理在终止 TLS 后通常会带 `X-Forwarded-Proto: https`；只有这时才加
 /// `Secure`，本地明文访问不受影响。
-pub fn isSecureRequest(request: *const http.Server.Request) bool {
+///
+/// 该头只能由本机反向代理覆盖，所以只在对端是回环地址时才信任；否则任何
+/// 直连客户端都能伪造它。
+pub fn isSecureRequest(request: *const http.Server.Request, trust_forwarded: bool) bool {
+    if (!trust_forwarded) return false;
     var it = request.iterateHeaders();
     while (it.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, "x-forwarded-proto")) {

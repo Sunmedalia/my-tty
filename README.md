@@ -103,7 +103,11 @@ journalctl -u my-tty -f
 重命名、递归删除、上传/下载，以及纯文本编辑（≤1 MiB，`Ctrl+S` 保存）。
 上传可以点 ⇪、拖进面板，或拖到某个目录行；文件按 4 MiB 分片，带进度条和取消，
 网络中断时会向服务端查询已写入偏移继续传；单个文件上限 64 MiB。
+半截的上传文件权限为 `0600`，完成并改名为正式文件后恢复为 `0644`；
+超过 24 小时没有更新的临时文件会在启动时和每 6 小时自动清理。
 下载流式响应、带 `Content-Disposition: attachment`；目录可以下载成 `.tar`。
+单次列目录最多返回 1 万条（前端提示已截断）；目录归档最多 5 万条/8 GiB，
+超出时会停止追加并写入 `MY-TTY-TRUNCATED.txt`，不会生成损坏的 tar。
 路径参数一律相对 root，服务端用 realpath 前缀校验，`..` 和符号链接都无法越界。
 HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 `POST /api/fs/mkdir|rename`、`DELETE /api/fs/delete`。
@@ -148,6 +152,8 @@ HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 - HTTP 阶段等待请求头超过 30 秒会被服务端主动断开（防 slowloris）；
   大文件上传/下载与 WebSocket 不受这个计时影响。
 - 带 `Origin` 的 WebSocket 请求必须与 `Host` 一致；一次性票据防止跨站复用。
+- `X-Forwarded-Host` / `X-Forwarded-Proto` 只在对端是回环地址（本机反向代理）时信任；
+  直连客户端伪造这两个头不会改变 Origin 校验或 Cookie 的 `Secure` 属性。
 - `SIGTERM`/`SIGINT` 会停止 accept、回收所有 PTY 后退出。
 - 文件管理/编辑只允许访问 `root` 下的真实路径，符号链接无法逃逸。
 - 会话数受 `max_sessions` 限制；分屏上限 4。

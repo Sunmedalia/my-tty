@@ -193,7 +193,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
 
     installSignalHandlers();
 
-    const maint = std.Thread.spawn(.{}, maintenance, .{ io, &auth_state, &manager }) catch null;
+    const maint = std.Thread.spawn(.{}, maintenance, .{ io, gpa, &fs, &auth_state, &manager }) catch null;
 
     std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  root={s}  会话={d}天/{d}h  连接≤{d}  保持={d}分钟\n", .{
         cfg.host,
@@ -260,7 +260,13 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     std.debug.print("已退出\n", .{});
 }
 
-fn maintenance(io: Io, auth_state: *auth.Auth, manager: *session.Manager) void {
+/// 断点续传临时文件的清理间隔（秒）。
+const upload_sweep_ticks: u32 = 6 * 60 * 60;
+
+fn maintenance(io: Io, gpa: Allocator, fs: *const fsapi.Fs, auth_state: *auth.Auth, manager: *session.Manager) void {
+    // 启动时先清一次上次进程留下的半截上传。
+    fsapi.sweepUploadTemps(io, gpa, fs, fsapi.upload_temp_ttl_ns);
+
     var ticks: u32 = 0;
     // 1 秒一跳，便于 SIGTERM 时尽快 join；每 60 跳做一次清理。
     while (!shutting_down.load(.acquire)) {
@@ -272,6 +278,9 @@ fn maintenance(io: Io, auth_state: *auth.Auth, manager: *session.Manager) void {
         // 登录会话/票据的清理保持每分钟一次即可。
         manager.sweep();
         if (ticks % 60 == 0) auth_state.sweep();
+        if (ticks % upload_sweep_ticks == 0) {
+            fsapi.sweepUploadTemps(io, gpa, fs, fsapi.upload_temp_ttl_ns);
+        }
     }
 }
 
@@ -309,7 +318,7 @@ fn connectionMain(
                     respond(&request, "bad websocket request\n", .bad_request) catch {};
                     return;
                 };
-                if (!originAllowed(&request)) {
+                if (!originAllowed(&request, peerIsLoopback(peer))) {
                     respond(&request, "origin not allowed\n", .forbidden) catch {};
                     return;
                 }
@@ -349,6 +358,8 @@ fn handleHttp(
     request: *http.Server.Request,
 ) !void {
     const path = util.pathOnly(request.head.target);
+    // X-Forwarded-* 只有本机反向代理才有资格设置；直连客户端伪造的不认。
+    const trust_forwarded = peerIsLoopback(peer);
 
     // 唯一的例外：登录端点本身。没有它就无法获得会话。
     if (std.mem.eql(u8, path, "/api/auth/login")) {
@@ -356,13 +367,13 @@ fn handleHttp(
         // 给整个请求 10 秒上限，挡住慢 body 占住连接线程。
         connSetDeadline(io, fd, 10);
         defer connClearDeadline(io, fd);
-        return handleLogin(io, gpa, cfg, auth_state, limiter, peer, request);
+        return handleLogin(io, gpa, cfg, auth_state, limiter, peer, trust_forwarded, request);
     }
 
     // 其余所有 API（含注销、状态、票据）都必须先通过会话认证。
     if (std.mem.startsWith(u8, path, "/api/")) {
         if (!authorized(auth_state, request)) return deny(request);
-        if (std.mem.eql(u8, path, "/api/auth/logout")) return handleLogout(auth_state, request);
+        if (std.mem.eql(u8, path, "/api/auth/logout")) return handleLogout(auth_state, trust_forwarded, request);
         if (std.mem.eql(u8, path, "/api/auth/status")) return handleStatus(auth_state, request);
         if (std.mem.eql(u8, path, "/api/auth/ticket")) return handleTicket(auth_state, request);
         if (std.mem.startsWith(u8, path, "/api/fs/")) return fsapi.handle(io, gpa, fs, request);
@@ -405,6 +416,7 @@ fn handleLogin(
     auth_state: *auth.Auth,
     limiter: *LoginLimiter,
     peer: net.IpAddress,
+    trust_forwarded: bool,
     request: *http.Server.Request,
 ) !void {
     if (request.head.method != .POST) return respond(request, "method not allowed\n", .method_not_allowed);
@@ -421,7 +433,7 @@ fn handleLogin(
     }
 
     // 读 body 之后 head/header 迭代器不再可用，先把 Cookie 相关判断做掉。
-    const secure = auth.isSecureRequest(request);
+    const secure = auth.isSecureRequest(request, trust_forwarded);
 
     var body_buf: [4096]u8 = undefined;
     const reader = request.readerExpectContinue(&body_buf) catch return respond(request, "{\"error\":\"bad_body\"}\n", .bad_request);
@@ -467,13 +479,13 @@ fn handleLogin(
     return request.respond(json, .{ .extra_headers = list });
 }
 
-fn handleLogout(auth_state: *auth.Auth, request: *http.Server.Request) !void {
+fn handleLogout(auth_state: *auth.Auth, trust_forwarded: bool, request: *http.Server.Request) !void {
     if (request.head.method != .POST) return respond(request, "method not allowed\n", .method_not_allowed);
 
     if (auth.cookieFromRequest(request)) |cookie| auth_state.logout(cookie);
 
     var cookie_buf: [256]u8 = undefined;
-    const cookie = auth.setCookieValue(&cookie_buf, null, 0, auth.isSecureRequest(request));
+    const cookie = auth.setCookieValue(&cookie_buf, null, 0, auth.isSecureRequest(request, trust_forwarded));
 
     var headers: [8]http.Header = undefined;
     const list = buildHeaders(&headers, &.{
@@ -611,8 +623,22 @@ fn wsAuthorized(auth_state: *auth.Auth, request: *const http.Server.Request) boo
     return auth_state.consumeTicket(ticket);
 }
 
+/// 对端是否为本机（127.0.0.0/8 或 ::1）。
+fn peerIsLoopback(peer: net.IpAddress) bool {
+    return switch (peer) {
+        .ip4 => |a| a.bytes[0] == 127,
+        .ip6 => |a| blk: {
+            for (a.bytes[0..15]) |b| if (b != 0) break :blk false;
+            break :blk a.bytes[15] == 1;
+        },
+    };
+}
+
 /// 浏览器带 Origin 时，必须与 Host 一致；非浏览器客户端可以不带。
-fn originAllowed(request: *const http.Server.Request) bool {
+///
+/// `X-Forwarded-Host` 只在对端是回环（本机反向代理）时才认；否则直连客户端
+/// 可以伪造该头绕过 Origin 比较。
+fn originAllowed(request: *const http.Server.Request, trust_forwarded: bool) bool {
     var origin: ?[]const u8 = null;
     var host: ?[]const u8 = null;
     var forwarded_host: ?[]const u8 = null;
@@ -622,6 +648,7 @@ fn originAllowed(request: *const http.Server.Request) bool {
         if (std.ascii.eqlIgnoreCase(header.name, "host")) host = header.value;
         if (std.ascii.eqlIgnoreCase(header.name, "x-forwarded-host")) forwarded_host = header.value;
     }
+    if (!trust_forwarded) forwarded_host = null;
     const o = origin orelse return true;
     const expected = blk: {
         if (host) |h| {

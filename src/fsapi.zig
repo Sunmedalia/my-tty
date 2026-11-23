@@ -17,6 +17,23 @@ pub const max_read: usize = 1024 * 1024;
 pub const max_write: usize = 1024 * 1024;
 pub const max_upload: usize = 64 * 1024 * 1024;
 
+/// 单次 list 最多返回的条目数；超出时截断并标记 `truncated`。
+pub const max_list_entries: usize = 10_000;
+/// 目录归档的条目/字节上限；超出时停止追加并写入说明文件。
+pub const max_tar_entries: usize = 50_000;
+pub const max_tar_bytes: u64 = 8 * 1024 * 1024 * 1024;
+
+/// 断点续传临时文件的保留时间；超过后由维护线程清理。
+pub const upload_temp_ttl_ns: i96 = 24 * std.time.ns_per_hour;
+
+/// 清理时要遍历的目录深度/条目上限，避免维护线程在大目录上跑太久。
+const sweep_max_depth: u32 = 16;
+const sweep_max_entries: usize = 50_000;
+
+/// 上传临时文件只对当前用户可读写；完成后再改回普通文件权限。
+const upload_temp_mode: std.posix.mode_t = 0o600;
+const upload_final_mode: std.posix.mode_t = 0o644;
+
 pub const Fs = struct {
     /// 规范化后的绝对路径，不以 `/` 结尾（根目录 `/` 除外）。
     root: []const u8,
@@ -101,8 +118,14 @@ fn list(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) 
     defer dir.close(io);
 
     var entries: std.ArrayList(Entry) = .empty;
+    var truncated = false;
     var it = dir.iterate();
     while (it.next(io) catch |err| return failMapped(request, arena, err)) |entry| {
+        // 目录可能非常大；先截断再排序，避免一次请求吃光内存。
+        if (entries.items.len >= max_list_entries) {
+            truncated = true;
+            break;
+        }
         const name = arena.dupe(u8, entry.name) catch return fail(request, arena, .internal_server_error, "out_of_memory");
         const size: u64 = if (entry.kind == .file) blk: {
             const st = dir.statFile(io, entry.name, .{ .follow_symlinks = false }) catch break :blk 0;
@@ -117,8 +140,12 @@ fn list(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) 
 
     std.mem.sort(Entry, entries.items, {}, entryLessThan);
 
-    const Payload = struct { path: []const u8, entries: []const Entry };
-    return respondJson(request, arena, .ok, Payload{ .path = rel, .entries = entries.items });
+    const Payload = struct { path: []const u8, entries: []const Entry, truncated: bool };
+    return respondJson(request, arena, .ok, Payload{
+        .path = rel,
+        .entries = entries.items,
+        .truncated = truncated,
+    });
 }
 
 fn read(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
@@ -279,8 +306,12 @@ fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []c
             error.FileNotFound => {},
             else => return failMapped(request, arena, err),
         };
-        file = Dir.cwd().createFile(io, temp, .{ .truncate = true, .exclusive = true }) catch |err|
-            return failMapped(request, arena, err);
+        // 半截文件只有本用户可以读写，避免多用户机器上被其他本地用户读到。
+        file = Dir.cwd().createFile(io, temp, .{
+            .truncate = true,
+            .exclusive = true,
+            .permissions = .fromMode(upload_temp_mode),
+        }) catch |err| return failMapped(request, arena, err);
     } else {
         file = Dir.cwd().openFile(io, temp, .{ .mode = .read_write, .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => return failOffset(request, arena, .conflict, "offset_mismatch", 0),
@@ -316,6 +347,13 @@ fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []c
         fw.interface.writeAll(chunk[0..n]) catch |err| return failMapped(request, arena, err);
     }
     fw.interface.flush() catch |err| return failMapped(request, arena, err);
+
+    // 完整写入后改回普通文件权限再 rename；未完成的半截文件保持 0600。
+    // 用 fd 上的 chmod，不经过路径，因此不受符号链接替换影响。
+    if (written == total) {
+        file.setPermissions(io, .fromMode(upload_final_mode)) catch {};
+    }
+
     file.close(io);
     closed = true;
 
@@ -376,6 +414,61 @@ fn uploadTempPath(alloc: Allocator, target_abs: []const u8, id: []const u8) ![]c
     return std.fmt.allocPrint(alloc, "{s}/.myty-upload-{s}", .{ target_abs[0..slash], id });
 }
 
+/// `.myty-upload-<8..32 hex>`，与上传时生成的临时文件名一致。
+fn isUploadTempName(name: []const u8) bool {
+    const prefix = ".myty-upload-";
+    if (!std.mem.startsWith(u8, name, prefix)) return false;
+    return validUploadId(name[prefix.len..]) != null;
+}
+
+/// 清理超过 `ttl_ns` 没有更新的断点续传临时文件。
+///
+/// 只删除 root 内、名字严格匹配 `.myty-upload-<8..32 hex>` 的普通文件；
+/// 不跟随符号链接，深度和条目数都有上限，避免维护线程在超大目录上跑太久。
+pub fn sweepUploadTemps(io: Io, alloc: Allocator, fs: *const Fs, ttl_ns: i96) void {
+    const cutoff = Io.Clock.real.now(io).nanoseconds - ttl_ns;
+    var budget: usize = sweep_max_entries;
+    const root = alloc.dupe(u8, fs.root) catch return;
+    defer alloc.free(root);
+    sweepTempsIn(io, alloc, root, 0, cutoff, &budget);
+}
+
+fn sweepTempsIn(
+    io: Io,
+    alloc: Allocator,
+    dir_abs: []const u8,
+    depth: u32,
+    cutoff: i96,
+    budget: *usize,
+) void {
+    if (depth > sweep_max_depth) return;
+
+    var dir = Dir.cwd().openDir(io, dir_abs, .{ .iterate = true, .follow_symlinks = false }) catch return;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (true) {
+        if (budget.* == 0) return;
+        const entry = it.next(io) catch return orelse return;
+        budget.* -= 1;
+
+        if (isUploadTempName(entry.name)) {
+            const st = dir.statFile(io, entry.name, .{ .follow_symlinks = false }) catch continue;
+            if (st.kind != .file) continue;
+            if (st.mtime.nanoseconds > cutoff) continue;
+            const path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_abs, entry.name }) catch continue;
+            defer alloc.free(path);
+            Dir.cwd().deleteFile(io, path) catch {};
+            continue;
+        }
+
+        if (entry.kind != .directory) continue;
+        const child = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_abs, entry.name }) catch continue;
+        defer alloc.free(child);
+        sweepTempsIn(io, alloc, child, depth + 1, cutoff, budget);
+    }
+}
+
 fn parseU64(text: []const u8) ?u64 {
     return std.fmt.parseInt(u64, text, 10) catch null;
 }
@@ -415,19 +508,53 @@ fn archive(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Reques
 
     var tw: std.tar.Writer = .{ .underlying_writer = &body.writer };
     tw.setRoot(root_name) catch return error.WriteFailed;
-    try walkTar(io, arena, &tw, abs, "", 0);
+    var state: TarState = .{};
+    try walkTar(io, arena, &tw, &state, abs, "", 0);
+    if (state.truncated) {
+        // 不能中途直接断流（客户端会当成损坏的 tar）；写完截止点再补一个说明文件。
+        tw.writeFileBytes(
+            "MY-TTY-TRUNCATED.txt",
+            "归档内容超过服务端上限，已截断。请改为下载子目录，或单独下载文件。\n" ++
+                "本文件由 my-tty 自动生成。\n",
+            .{},
+        ) catch {};
+    }
     tw.finishPedantically() catch return error.WriteFailed;
     return body.end();
 }
 
-fn walkTar(io: Io, alloc: Allocator, tw: *std.tar.Writer, dir_abs: []const u8, prefix: []const u8, depth: u32) !void {
-    if (depth > 64) return;
+const TarState = struct {
+    entries: usize = 0,
+    bytes: u64 = 0,
+    truncated: bool = false,
+};
+
+fn walkTar(
+    io: Io,
+    alloc: Allocator,
+    tw: *std.tar.Writer,
+    state: *TarState,
+    dir_abs: []const u8,
+    prefix: []const u8,
+    depth: u32,
+) !void {
+    if (state.truncated) return;
+    if (depth > 64) {
+        state.truncated = true;
+        return;
+    }
 
     var dir = Dir.cwd().openDir(io, dir_abs, .{ .iterate = true, .follow_symlinks = false }) catch return;
     defer dir.close(io);
 
     var it = dir.iterate();
     while (it.next(io) catch return) |entry| {
+        if (state.truncated) return;
+        if (state.entries >= max_tar_entries) {
+            state.truncated = true;
+            return;
+        }
+
         const sub = if (prefix.len == 0)
             try alloc.dupe(u8, entry.name)
         else
@@ -435,14 +562,22 @@ fn walkTar(io: Io, alloc: Allocator, tw: *std.tar.Writer, dir_abs: []const u8, p
 
         switch (entry.kind) {
             .directory => {
+                state.entries += 1;
                 tw.writeDir(sub, .{}) catch continue;
                 const child_abs = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_abs, entry.name });
-                walkTar(io, alloc, tw, child_abs, sub, depth + 1) catch {};
+                walkTar(io, alloc, tw, state, child_abs, sub, depth + 1) catch {};
             },
             .file => {
                 var file = dir.openFile(io, entry.name, .{ .follow_symlinks = false }) catch continue;
                 defer file.close(io);
                 const st = file.stat(io) catch continue;
+                // 流式 tar 的头部要预先写长度，不能一边超限一边回头改。
+                if (st.size > max_tar_bytes - state.bytes) {
+                    state.truncated = true;
+                    return;
+                }
+                state.entries += 1;
+                state.bytes += st.size;
                 var buf: [64 * 1024]u8 = undefined;
                 var fr = file.reader(io, &buf);
                 tw.writeFileStream(sub, st.size, &fr.interface, .{}) catch continue;
@@ -687,6 +822,13 @@ test "upload id validation" {
     try std.testing.expect(validUploadId("abcdef") == null);
     try std.testing.expect(validUploadId("zzzzzzzz") == null);
     try std.testing.expect(validUploadId("0123456789abcdef0123456789abcdef0") == null);
+}
+
+test "upload temp name matching" {
+    try std.testing.expect(isUploadTempName(".myty-upload-abcdef0123456789"));
+    try std.testing.expect(!isUploadTempName(".myty-upload-abc"));
+    try std.testing.expect(!isUploadTempName(".myty-upload-zzzzzzzz"));
+    try std.testing.expect(!isUploadTempName("myty-upload-abcdef0123456789"));
 }
 
 test "upload temp path stays beside the target" {

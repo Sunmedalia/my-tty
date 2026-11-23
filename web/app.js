@@ -561,7 +561,9 @@
     try {
       const data = await api("GET", "list", { path: currentDir });
       renderCrumbs();
-      renderEntries(data.entries || []);
+      const entries = data.entries || [];
+      renderEntries(entries);
+      if (data.truncated) notice(`目录条目过多，仅显示前 ${entries.length} 项`);
     } catch (err) {
       notice(`列目录失败: ${err.message}`, true);
     }
