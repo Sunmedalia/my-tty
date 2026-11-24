@@ -112,6 +112,28 @@ button:focus-visible {
   text-overflow: ellipsis;
 }
 
+/* 文件 / 新建分屏 / 注销统一用图标，桌面侧栏和移动端顶栏都更紧凑。 */
+#bar #toggle-files,
+#bar #add-pane,
+#bar #logout {
+  font-size: 0;
+}
+
+#bar #toggle-files::before {
+  content: "▤";
+  font-size: 15px;
+}
+
+#bar #add-pane::before {
+  content: "⊞";
+  font-size: 15px;
+}
+
+#bar #logout::before {
+  content: "⏻";
+  font-size: 15px;
+}
+
 /* PC 细指针：顶栏改成窄图标侧栏，省出垂直和水平空间。 */
 @media (min-width: 900px) and (pointer: fine) {
   #app {
@@ -176,27 +198,6 @@ button:focus-visible {
   #bar button.icon {
     width: 30px;
     min-width: 0;
-  }
-
-  #bar #toggle-files,
-  #bar #add-pane,
-  #bar #logout {
-    font-size: 0;
-  }
-
-  #bar #toggle-files::before {
-    content: "▤";
-    font-size: 14px;
-  }
-
-  #bar #add-pane::before {
-    content: "⊞";
-    font-size: 14px;
-  }
-
-  #bar #logout::before {
-    content: "⏻";
-    font-size: 14px;
   }
 
   #bar #logout {
