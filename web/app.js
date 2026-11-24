@@ -74,7 +74,6 @@
       <div class="pane-bar">
         <span class="pane-dot"></span>
         <span class="pane-status">连接中…</span>
-        <button class="pane-max" type="button" title="最大化 / 还原">⤢</button>
         <button class="pane-close" type="button" title="关闭此分屏">✕</button>
       </div>
       <div class="pane-term"></div>`;
@@ -251,10 +250,6 @@
     el.querySelector(".pane-close").addEventListener("click", (ev) => {
       ev.stopPropagation();
       removePane(pane);
-    });
-    el.querySelector(".pane-max").addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      toggleMaximize(pane);
     });
     status.addEventListener("click", () => {
       if (!pane.alive && pane.reconnect) pane.reconnect();
@@ -604,16 +599,9 @@
       return false;
     }
     if (event.type !== "keydown") return true;
-    if (event.key === "Escape") {
-      if (workspace.classList.contains("maximized")) {
-        const max = panes.find((p) => p.el.classList.contains("maximized"));
-        if (max) toggleMaximize(max);
-        return false;
-      }
-      if (!findBar.hidden) {
-        closeFind();
-        return false;
-      }
+    if (event.key === "Escape" && !findBar.hidden) {
+      closeFind();
+      return false;
     }
 
     const explicitCopy =
@@ -1119,12 +1107,6 @@
     }
     if (ev.key === "Escape") {
       if (!editorOverlay.hidden) return; // 编辑器自己处理
-      if (workspace.classList.contains("maximized")) {
-        ev.preventDefault();
-        const max = panes.find((p) => p.el.classList.contains("maximized"));
-        if (max) toggleMaximize(max);
-        return;
-      }
       if (!findBar.hidden) {
         ev.preventDefault();
         closeFind();
@@ -1268,19 +1250,6 @@
       p.term.options.fontSize = fontsize;
       fitPane(p);
     }
-  }
-
-  function toggleMaximize(pane) {
-    const isMax = pane.el.classList.contains("maximized");
-    for (const p of panes) p.el.classList.remove("maximized");
-    if (isMax) {
-      workspace.classList.remove("maximized");
-    } else {
-      pane.el.classList.add("maximized");
-      workspace.classList.add("maximized");
-      focusPane(pane);
-    }
-    requestAnimationFrame(() => panes.forEach(fitPane));
   }
 
   // --------------------------------------------------------- 剪贴板兜底

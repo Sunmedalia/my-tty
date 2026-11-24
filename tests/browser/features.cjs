@@ -1,4 +1,4 @@
-// 字号、搜索、最大化、拖拽分栏、编辑器行号与 Tab。
+// 字号、搜索、拖拽分栏、编辑器行号与 Tab。
 const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
@@ -115,19 +115,6 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
     { timeout: 8000 }
   );
   await page.keyboard.press("Escape");
-
-  await page.locator(".pane").first().hover();
-  await page.locator(".pane-max").first().click();
-  await page.waitForTimeout(400);
-  assert(await page.evaluate(() => document.querySelector("#workspace").classList.contains("maximized")), "maximized");
-  const dims = await page.evaluate(() => {
-    const a = document.querySelector(".pane.maximized").getBoundingClientRect();
-    const b = document.querySelector("#workspace").getBoundingClientRect();
-    return { aw: a.width, ah: a.height, bw: b.width, bh: b.height };
-  });
-  assert(Math.abs(dims.aw - dims.bw) < 4 && Math.abs(dims.ah - dims.bh) < 4, "maximized fills");
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(300);
 
   await page.click("#add-pane");
   await page.waitForTimeout(600);
