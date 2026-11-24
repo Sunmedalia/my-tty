@@ -698,6 +698,7 @@
     // 避免出现 1/1、2/2 这种没有信息量的分数。
     statusEl.textContent =
       total === 0 ? "无会话" : alive === total ? "已连接" : `${alive}/${total} 已连接`;
+    statusEl.title = statusEl.textContent;
     statusEl.className = alive === total && total > 0 ? "ok" : total ? "pending" : "";
   }
 

@@ -92,7 +92,7 @@ journalctl -u my-tty -f
   `HttpOnly; SameSite=Strict; Path=/`，反向代理以 HTTPS 终止时自动加 `Secure`。
 - 会话默认 **7 天**，由 `--session-ttl-days` 调整（1–365）；空闲超时默认 24 小时，
   由 `--session-idle-hours` 调整（0 关闭）。
-- “注销”（PC 左侧控制栏 / 移动端顶栏）会同时清除服务端会话与 Cookie；所有终端随之关闭。
+- “注销”（PC 左侧图标栏 / 移动端顶栏）会同时清除服务端会话与 Cookie；所有终端随之关闭。
 - 会话只存在内存中，进程重启后需要重新登录；一次性 WS 票据 30 秒失效。
   终端会话同样是内存态，进程重启后 shell 不会保留。
 - 同一 IP 连续失败 5 次登录会封禁 5 分钟（429 + `Retry-After`）；
@@ -121,7 +121,7 @@ HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 4 屏 2×2，横竖分栏都可以拖拽。每个 pane 是独立的终端、WebSocket 和 PTY，
 关闭 pane 会回收对应 shell。`Ctrl+Shift+F` 搜索，`Ctrl+Shift+±` 调整字号，
 `F3` 下一个匹配。移动端会显示 Esc/Tab/Ctrl/方向键/^C/^D/^L 按键条；
-PC 上顶栏变成左侧控制栏；移动端保留顶栏和底部按键条，并预留底部安全区；
+PC 上顶栏变成左侧窄图标栏（44px）；移动端保留顶栏和底部按键条，并预留底部安全区；
 触摸设备上文件行的下载/重命名/删除按钮常显；
 pane 标题栏改为固定在终端上方（不再悬浮遮挡内容）。
 
@@ -147,7 +147,7 @@ pane 标题栏改为固定在终端上方（不再悬浮遮挡内容）。
   Chrome/Edge 的 DevTools“检查元素”快捷键抢走（DevTools 仍可从菜单打开）。
 - 以上只绑定 Ctrl；macOS 的 `Cmd+C` / `Cmd+V` 由 xterm 走浏览器原生 copy/paste 事件，
   前端不再单独判断 `metaKey`。
-- PC 左侧控制栏的 `^C` 按钮直接向当前 pane 发送 `0x03`，用于 RDP/远程桌面吞掉 Ctrl、
+- PC 左侧图标栏的 `^C` 按钮直接向当前 pane 发送 `0x03`，用于 RDP/远程桌面吞掉 Ctrl、
   或不想用键盘的场景；移动端只在底部按键条保留一个 `^C`，顶栏那个会隐藏。
 
 ## 会话保持

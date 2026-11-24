@@ -112,31 +112,22 @@ button:focus-visible {
   text-overflow: ellipsis;
 }
 
-/* PC 细指针：顶栏改成左侧控制栏，省出垂直空间。 */
+/* PC 细指针：顶栏改成窄图标侧栏，省出垂直和水平空间。 */
 @media (min-width: 900px) and (pointer: fine) {
   #app {
     flex-direction: row;
   }
 
   #bar {
-    flex: 0 0 136px;
-    width: 136px;
+    flex: 0 0 44px;
+    width: 44px;
     height: auto;
     flex-direction: column;
-    align-items: stretch;
+    align-items: center;
     gap: 6px;
-    padding: 10px;
+    padding: 6px 0;
     border-right: 1px solid var(--line);
     border-bottom: 0;
-  }
-
-  #bar .brand {
-    align-self: flex-start;
-    margin-bottom: 2px;
-  }
-
-  #bar #status {
-    align-self: flex-start;
   }
 
   #bar .spacer,
@@ -144,9 +135,68 @@ button:focus-visible {
     display: none;
   }
 
+  #bar .brand {
+    font-size: 0;
+    margin-bottom: 2px;
+  }
+
+  #bar .brand::before {
+    content: ">_";
+    font-size: 12px;
+    letter-spacing: 0;
+    color: var(--fg);
+  }
+
+  #bar #status {
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    margin: 2px 0 6px;
+    border-radius: 50%;
+    background: #4a5268;
+    font-size: 0;
+  }
+
+  #bar #status.ok {
+    background: var(--ok);
+  }
+
+  #bar #status.pending {
+    background: var(--accent);
+  }
+
   #bar button {
-    width: 100%;
-    padding: 6px 9px;
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    font-size: 12px;
+  }
+
+  #bar button.icon {
+    width: 30px;
+    min-width: 0;
+  }
+
+  #bar #toggle-files,
+  #bar #add-pane,
+  #bar #logout {
+    font-size: 0;
+  }
+
+  #bar #toggle-files::before {
+    content: "▤";
+    font-size: 14px;
+  }
+
+  #bar #add-pane::before {
+    content: "⊞";
+    font-size: 14px;
+  }
+
+  #bar #logout::before {
+    content: "⏻";
+    font-size: 14px;
   }
 
   #bar #logout {
