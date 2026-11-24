@@ -82,7 +82,30 @@ const ROOT_NAME = path.basename(ROOT);
 
   await page.setInputFiles("#upload-input", src);
   await page.waitForFunction(() => document.querySelector("#file-list").innerText.includes("my-tty-upload-src.bin"), null, { timeout: 20000 });
-  const onDisk = fs.readFileSync(path.join(ROOT, "my-tty-upload-src.bin"));
+  const target = path.join(ROOT, "my-tty-upload-src.bin");
+  for (let i = 0; i < 50 && !fs.existsSync(target); i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!fs.existsSync(target)) {
+    const crumb = await page.evaluate(
+      () => document.querySelector("#crumb button.active")?.textContent || ""
+    );
+    const list = await page.evaluate(() =>
+      document.querySelector("#file-list").innerText.replace(/\n/g, " | ").slice(0, 300)
+    );
+    const rootNames = fs.readdirSync(ROOT).join(",");
+    let tmpNames = "";
+    try {
+      tmpNames = fs
+        .readdirSync(os.tmpdir())
+        .filter((n) => n.includes("my-tty-upload"))
+        .join(",");
+    } catch (_) {}
+    throw new Error(
+      `upload missing: root=${ROOT} crumb=${crumb} disk=[${rootNames}] tmp=[${tmpNames}] list=[${list}]`
+    );
+  }
+  const onDisk = fs.readFileSync(target);
   assert(onDisk.equals(big), "9 MiB upload bytes match");
 
   const row = page.locator("#file-list .entry.file", { hasText: "my-tty-upload-src.bin" });
