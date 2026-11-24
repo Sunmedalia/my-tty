@@ -35,12 +35,28 @@ done
 export BASE="http://127.0.0.1:$PORT"
 export PASSWORD ROOT
 
-node tests/browser/ui.cjs
-node tests/browser/tabs.cjs
-node tests/browser/features.cjs
-node tests/browser/clipboard.cjs
-node tests/browser/session.cjs
-node tests/browser/files.cjs
-node tests/browser/cwd.cjs
+run_test() {
+  local name="$1"
+  local output
+  if output=$(node "tests/browser/$name.cjs" 2>&1); then
+    printf '%s\n' "$output"
+    return 0
+  fi
+  printf '%s\n' "$output"
+  # 把失败测试名和最后一行错误写进 GitHub annotation：公开 API 也能看到，
+  # 不必登录下载 Actions 日志。
+  local msg
+  msg=$(printf '%s\n' "$output" | tr -d '\r' | awk 'NF { line = $0 } END { print line }' | sed 's/%/%25/g')
+  echo "::error title=browser:$name::$msg"
+  return 1
+}
+
+run_test ui
+run_test tabs
+run_test features
+run_test clipboard
+run_test session
+run_test files
+run_test cwd
 
 echo "browser tests: ALL PASS"
