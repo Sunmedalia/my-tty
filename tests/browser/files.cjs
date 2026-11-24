@@ -10,10 +10,15 @@ const ROOT = process.env.ROOT;
 const CHROME = process.env.CHROME || undefined;
 const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
 const ROOT_NAME = path.basename(ROOT);
+const ROOT_REL = ROOT.replace(/^\/+/, "");
+const rowFor = (rel) => `#file-list .entry[data-path="${rel}"]`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
-  const src = path.join(os.tmpdir(), "my-tty-upload-src.bin");
-  const dst = path.join(os.tmpdir(), "my-tty-upload-dst.bin");
+  // 源文件放在 /tmp 的子目录里：文件树会展开 /tmp，放在顶层会和上传目标同名。
+  const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), "mytty-src-"));
+  const src = path.join(srcDir, "my-tty-upload-src.bin");
+  const dst = path.join(srcDir, "my-tty-upload-dst.bin");
   const big = Buffer.alloc(9 * 1024 * 1024);
   for (let i = 0; i < big.length; i++) big[i] = (i * 31) & 0xff;
   fs.writeFileSync(src, big);
@@ -80,35 +85,32 @@ const ROOT_NAME = path.basename(ROOT);
   await page.click("#editor-close");
   await page.waitForTimeout(200);
 
-  await page.setInputFiles("#upload-input", src);
-  await page.waitForFunction(() => document.querySelector("#file-list").innerText.includes("my-tty-upload-src.bin"), null, { timeout: 20000 });
+  const uploadRel = `${ROOT_REL}/my-tty-upload-src.bin`;
   const target = path.join(ROOT, "my-tty-upload-src.bin");
-  for (let i = 0; i < 50 && !fs.existsSync(target); i += 1) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  await page.setInputFiles("#upload-input", src);
+  for (let i = 0; i < 200 && !fs.existsSync(target); i += 1) await sleep(100);
   if (!fs.existsSync(target)) {
     const crumb = await page.evaluate(
       () => document.querySelector("#crumb button.active")?.textContent || ""
     );
-    const list = await page.evaluate(() =>
-      document.querySelector("#file-list").innerText.replace(/\n/g, " | ").slice(0, 300)
-    );
     const rootNames = fs.readdirSync(ROOT).join(",");
-    let tmpNames = "";
-    try {
-      tmpNames = fs
-        .readdirSync(os.tmpdir())
-        .filter((n) => n.includes("my-tty-upload"))
-        .join(",");
-    } catch (_) {}
-    throw new Error(
-      `upload missing: root=${ROOT} crumb=${crumb} disk=[${rootNames}] tmp=[${tmpNames}] list=[${list}]`
-    );
+    throw new Error(`upload missing: root=${ROOT} crumb=${crumb} disk=[${rootNames}]`);
   }
   const onDisk = fs.readFileSync(target);
   assert(onDisk.equals(big), "9 MiB upload bytes match");
 
-  const row = page.locator("#file-list .entry.file", { hasText: "my-tty-upload-src.bin" });
+  const row = page.locator(rowFor(uploadRel));
+  try {
+    await row.waitFor({ state: "visible", timeout: 10000 });
+  } catch (_) {
+    const crumb = await page.evaluate(
+      () => document.querySelector("#crumb button.active")?.textContent || ""
+    );
+    const paths = await page.evaluate(() =>
+      [...document.querySelectorAll("#file-list .entry")].map((el) => el.dataset.path).slice(0, 100)
+    );
+    throw new Error(`upload row missing: root=${ROOT_REL} crumb=${crumb} paths=[${paths.join(",")}]`);
+  }
   await row.hover();
   const [download] = await Promise.all([
     page.waitForEvent("download"),
@@ -121,13 +123,9 @@ const ROOT_NAME = path.basename(ROOT);
   fs.writeFileSync(path.join(ROOT, "arch", "x.txt"), "ARCHIVE_X");
   await page.click("#files-refresh");
   await page.waitForFunction(() => document.querySelector("#file-list").innerText.includes("arch"));
-  const dirRow = page.locator("#file-list .entry.directory", { hasText: "arch" });
+  const dirRow = page.locator(rowFor(`${ROOT_REL}/arch`));
   await dirRow.locator(".caret").click();
-  await page.waitForFunction(
-    () => [...document.querySelectorAll("#file-list .entry.file")].some((el) => el.textContent.includes("x.txt")),
-    null,
-    { timeout: 8000 }
-  );
+  await page.locator(rowFor(`${ROOT_REL}/arch/x.txt`)).waitFor({ state: "visible", timeout: 8000 });
   await dirRow.hover();
   const [tar] = await Promise.all([
     page.waitForEvent("download"),
@@ -141,6 +139,7 @@ const ROOT_NAME = path.basename(ROOT);
   const leftovers = fs.readdirSync(ROOT).filter((n) => n.startsWith(".myty-upload-"));
   assert(leftovers.length === 0, "no temp files");
   assert(errors.length === 0, "console errors: " + errors.join(" | "));
+  fs.rmSync(srcDir, { recursive: true, force: true });
   console.log("files: PASS");
   await browser.close();
 })().catch((e) => { console.error(e.message || e); process.exit(1); });
