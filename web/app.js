@@ -5,7 +5,10 @@
   const MAX_TABS = 8;
 
   const workspace = document.getElementById("workspace");
+  const tabStripEl = document.getElementById("tab-strip");
   const tabListEl = document.getElementById("tab-list");
+  const tabMoreBtn = document.getElementById("tab-more");
+  const tabMenuEl = document.getElementById("tab-menu");
   const tabAddBtn = document.getElementById("tab-add");
   const addPaneBtn = document.getElementById("add-pane");
   const filesBtn = document.getElementById("toggle-files");
@@ -82,6 +85,128 @@
     tabAddBtn.disabled = tabs.length >= MAX_TABS;
   }
 
+  let tabMenuOpen = false;
+
+  function positionTabMenu() {
+    if (tabMenuEl.hidden) return;
+    const r = tabMoreBtn.getBoundingClientRect();
+    tabMenuEl.style.left = `${Math.max(4, Math.round(r.left))}px`;
+    tabMenuEl.style.top = `${Math.round(r.bottom + 4)}px`;
+  }
+
+  function closeTabMenu() {
+    tabMenuEl.hidden = true;
+    tabMenuOpen = false;
+  }
+
+  function openTabMenu() {
+    if (tabMoreBtn.hidden) return;
+    tabMenuEl.hidden = false;
+    tabMenuOpen = true;
+    positionTabMenu();
+  }
+
+  function renderTabMenu(collapsedTabs) {
+    tabMenuEl.replaceChildren();
+    for (const tab of collapsedTabs) {
+      const row = document.createElement("div");
+      row.className = "menu-tab";
+
+      const label = document.createElement("button");
+      label.type = "button";
+      label.className = "menu-label";
+      label.textContent = tab.label.textContent;
+      label.classList.toggle("active", tab === activeTab);
+      label.addEventListener("click", () => {
+        activateTab(tab);
+        closeTabMenu();
+      });
+
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "menu-close";
+      close.title = "关闭标签页";
+      close.textContent = "✕";
+      close.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        closeTab(tab);
+        closeTabMenu();
+      });
+
+      row.appendChild(label);
+      row.appendChild(close);
+      tabMenuEl.appendChild(row);
+    }
+  }
+
+  // 标签栏放不下时，把最旧的标签折叠到左侧的“⋯”菜单里；当前标签始终可见。
+  function layoutTabs() {
+    const n = tabs.length;
+    if (n === 0) {
+      tabMoreBtn.hidden = true;
+      closeTabMenu();
+      return;
+    }
+
+    // 先全部展开量一次真实宽度（同步完成，不会绘制到屏幕）。
+    for (const tab of tabs) tab.btn.classList.remove("collapsed");
+    const widths = tabs.map((tab) => tab.btn.getBoundingClientRect().width);
+    const gap = parseFloat(getComputedStyle(tabStripEl).columnGap) || 4;
+    const plusW = tabAddBtn.getBoundingClientRect().width;
+
+    tabMoreBtn.hidden = false;
+    const moreW = tabMoreBtn.getBoundingClientRect().width;
+    const available = tabStripEl.clientWidth - 2;
+    const activeIdx = tabs.indexOf(activeTab);
+
+    let visible = null;
+    let collapsed = 0;
+    for (let suffix = n; suffix >= 0; suffix -= 1) {
+      const set = new Set();
+      if (activeIdx >= 0) set.add(activeIdx);
+      for (let i = Math.max(0, n - suffix); i < n; i += 1) set.add(i);
+
+      collapsed = n - set.size;
+      let width = plusW + (collapsed > 0 ? moreW : 0);
+      const items = 1 + (collapsed > 0 ? 1 : 0) + set.size;
+      for (const i of set) width += widths[i];
+      width += gap * Math.max(0, items - 1);
+
+      if (width <= available) {
+        visible = set;
+        break;
+      }
+    }
+
+    if (!visible) {
+      visible = new Set();
+      collapsed = n;
+    }
+
+    const collapsedTabs = [];
+    for (let i = 0; i < n; i += 1) {
+      const show = visible.has(i);
+      tabs[i].btn.classList.toggle("collapsed", !show);
+      if (!show) collapsedTabs.push(tabs[i]);
+    }
+
+    const hasCollapsed = collapsedTabs.length > 0;
+    tabMoreBtn.hidden = !hasCollapsed;
+    tabMoreBtn.classList.toggle(
+      "active",
+      activeTab !== null && collapsedTabs.includes(activeTab)
+    );
+    tabMoreBtn.title = hasCollapsed ? `还有 ${collapsedTabs.length} 个标签页` : "";
+
+    if (!hasCollapsed) {
+      closeTabMenu();
+      tabMenuEl.replaceChildren();
+    } else {
+      renderTabMenu(collapsedTabs);
+      if (tabMenuOpen) positionTabMenu();
+    }
+  }
+
   function addTab() {
     if (tabs.length >= MAX_TABS) return null;
 
@@ -120,6 +245,7 @@
     });
 
     updateTabHint();
+    layoutTabs();
     return tab;
   }
 
@@ -158,6 +284,7 @@
     for (const p of panes) p.el.classList.toggle("active", p === activePane);
 
     layout(tab);
+    layoutTabs();
     updateSummary();
     saveSessions();
     requestAnimationFrame(() => {
@@ -186,6 +313,7 @@
     }
 
     updateTabHint();
+    layoutTabs();
     saveSessions();
   }
 
@@ -1277,6 +1405,26 @@
 
   addPaneBtn.addEventListener("click", () => createPane());
   tabAddBtn.addEventListener("click", () => newTab());
+  tabMoreBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    if (tabMenuEl.hidden) openTabMenu();
+    else closeTabMenu();
+  });
+  document.addEventListener("click", (ev) => {
+    if (tabMenuEl.hidden) return;
+    if (tabMoreBtn.contains(ev.target) || tabMenuEl.contains(ev.target)) return;
+    closeTabMenu();
+  });
+  document.addEventListener(
+    "keydown",
+    (ev) => {
+      if (ev.key !== "Escape" || tabMenuEl.hidden) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeTabMenu();
+    },
+    true
+  );
 
   findInput.addEventListener("input", () => runFind(false, true));
   findInput.addEventListener("keydown", (ev) => {
@@ -1374,9 +1522,15 @@
   });
   ro.observe(workspace);
 
-  window.addEventListener("resize", () => panes.forEach(fitPane));
+  window.addEventListener("resize", () => {
+    panes.forEach(fitPane);
+    layoutTabs();
+  });
   if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(() => panes.forEach(fitPane));
+    document.fonts.ready.then(() => {
+      panes.forEach(fitPane);
+      layoutTabs();
+    });
   }
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) panes.forEach(fitPane);
@@ -1593,6 +1747,7 @@
     } else {
       layout();
     }
+    layoutTabs();
     refreshFiles();
   }
 

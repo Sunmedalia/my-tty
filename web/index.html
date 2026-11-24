@@ -25,8 +25,12 @@
 
       <div id="main">
         <div id="tabbar">
-          <div id="tab-list" role="tablist" aria-label="终端标签页"></div>
-          <button id="tab-add" type="button" title="新建标签页">＋</button>
+          <div id="tab-strip">
+            <button id="tab-more" type="button" title="隐藏的标签页" hidden>⋯</button>
+            <div id="tab-list" role="tablist" aria-label="终端标签页"></div>
+            <button id="tab-add" type="button" title="新建标签页">＋</button>
+          </div>
+          <div id="tab-menu" hidden></div>
         </div>
 
         <div id="find-bar" hidden>

@@ -69,6 +69,62 @@ const activeText = (page) =>
   );
   assert((await tabCount(page)) === 1, "tab list restored after reload");
 
+  // 窄屏：＋ 跟在可见标签后面，放不下的旧标签折叠进 ⋯ 菜单。
+  await page.setViewportSize({ width: 360, height: 800 });
+  await page.waitForTimeout(300);
+  for (let i = 0; i < 5; i += 1) {
+    await page.click("#tab-add");
+    await page.waitForTimeout(250);
+  }
+  await page.waitForTimeout(500);
+  assert(await page.isVisible("#tab-more"), "overflow shows the collapsed-tabs button");
+  const collapsed = await page.locator("#tab-list .tab.collapsed").count();
+  assert(collapsed > 0, "old tabs are collapsed");
+  assert(
+    await page.evaluate(() => {
+      const el = document.querySelector("#tab-list .tab.active");
+      return !!el && !el.classList.contains("collapsed");
+    }),
+    "active tab stays visible"
+  );
+  assert(
+    await page.evaluate(() => {
+      const shown = [...document.querySelectorAll("#tab-list .tab:not(.collapsed)")];
+      const last = shown[shown.length - 1];
+      const add = document.querySelector("#tab-add");
+      return !!last && add.getBoundingClientRect().left >= last.getBoundingClientRect().right;
+    }),
+    "+ sits after the last visible tab"
+  );
+
+  await page.click("#tab-more");
+  await page.waitForSelector("#tab-menu:not([hidden])");
+  assert(
+    (await page.locator("#tab-menu .menu-tab").count()) === collapsed,
+    "menu lists every collapsed tab"
+  );
+  const chosen = await page.locator("#tab-menu .menu-label").first().textContent();
+  await page.locator("#tab-menu .menu-label").first().click();
+  await page.waitForTimeout(400);
+  assert(await page.isHidden("#tab-menu"), "menu closes after choosing a tab");
+  assert(
+    (await page.locator("#tab-list .tab.active .tab-label").textContent()) === chosen,
+    "chosen tab becomes active"
+  );
+  assert(
+    await page.evaluate(() => {
+      const el = document.querySelector("#tab-list .tab.active");
+      return !!el && !el.classList.contains("collapsed");
+    }),
+    "chosen tab is made visible"
+  );
+
+  // 收尾：关掉额外标签，避免给后续用例留下太多会话。
+  while ((await tabCount(page)) > 1) {
+    await page.locator("#tab-list .tab:not(.collapsed) .tab-close").last().click();
+    await page.waitForTimeout(150);
+  }
+
   assert(errors.length === 0, "console errors: " + errors.join(" | "));
   console.log("tabs: PASS");
   await browser.close();
