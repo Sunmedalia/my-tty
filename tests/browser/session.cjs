@@ -40,8 +40,18 @@ function waitReady(ws) {
   page.on("console", (m) => { if (m.type() === "error" && !m.text().includes("401")) errors.push(m.text()); });
 
   const termText = () => page.locator(".xterm-rows").innerText();
+  // 现在的存储格式是 { active, tabs: [{ x, y, s: [sessionId] }] }；
+  // 只取当前标签页的会话 id。
   const storedIds = () =>
-    page.evaluate(() => JSON.parse(sessionStorage.getItem("myttty.sessions") || "[]"));
+    page.evaluate(() => {
+      const saved = JSON.parse(sessionStorage.getItem("myttty.tabs") || "null");
+      if (!saved || !Array.isArray(saved.tabs) || !saved.tabs.length) return [];
+      const index = Number.isInteger(saved.active) ? saved.active : 0;
+      const tab = saved.tabs[Math.min(Math.max(index, 0), saved.tabs.length - 1)] || {};
+      return Array.isArray(tab.s)
+        ? tab.s.filter((id) => typeof id === "string" && /^[0-9a-f]{32}$/.test(id))
+        : [];
+    });
   const selectAllWithMouse = async () => {
     const box = await page.locator(".xterm-screen").boundingBox();
     await page.mouse.move(box.x + 5, box.y + 5);
