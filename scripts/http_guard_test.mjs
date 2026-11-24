@@ -110,23 +110,30 @@ if (password) {
   assert(/HTTP\/1\.1 400/.test(statusOut), "authenticated truncated body is rejected");
   assert(/connection: close/i.test(statusOut), "authenticated truncated body closes");
 
+  // 用一个唯一的 /tmp 路径，避免写进 /；被截断的请求不应留下任何文件。
+  const stamp = `mytty-guard-${process.pid}-${Date.now()}`;
+  const writePath = `tmp/${stamp}.txt`;
+  const uploadPath = `tmp/${stamp}.bin`;
+
   const writeOut = await exchange(
-    withCookie("PUT", "/api/fs/write?path=truncated.txt", "Content-Length: 5\r\n"),
+    withCookie("PUT", `/api/fs/write?path=${writePath}`, "Content-Length: 5\r\n"),
     { halfClose: true }
   );
   assert(/HTTP\/1\.1 400/.test(writeOut), "truncated write is rejected");
   assert(/connection: close/i.test(writeOut), "truncated write closes");
 
   const uploadOut = await exchange(
-    withCookie("PUT", "/api/fs/upload?path=truncated-upload.bin", "Content-Length: 5\r\n"),
+    withCookie("PUT", `/api/fs/upload?path=${uploadPath}`, "Content-Length: 5\r\n"),
     { halfClose: true }
   );
   assert(/HTTP\/1\.1 400/.test(uploadOut), "truncated upload is rejected");
   assert(/connection: close/i.test(uploadOut), "truncated upload closes");
 
-  const listing = await (await fetch(`${base}/api/fs/list?path=`, { headers: { cookie } })).text();
-  assert(!listing.includes("truncated.txt"), "truncated write must not create/replace the file");
-  assert(!listing.includes("truncated-upload.bin"), "truncated upload must not create/replace the file");
+  for (const path of [writePath, uploadPath]) {
+    const res = await fetch(`${base}/api/fs/read?path=${path}`, { headers: { cookie } });
+    assert(res.status === 404, `truncated request must not create ${path}`);
+    await fetch(`${base}/api/fs/delete?path=${path}`, { method: "DELETE", headers: { cookie } });
+  }
 }
 
 console.log("http guard: PASS");
