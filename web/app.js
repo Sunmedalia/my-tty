@@ -13,6 +13,7 @@
   const addPaneBtn = document.getElementById("add-pane");
   const filesBtn = document.getElementById("toggle-files");
   const filesEl = document.getElementById("files");
+  const filesResizeEl = document.getElementById("files-resize");
   const crumbEl = document.getElementById("crumb");
   const uploadBtn = document.getElementById("files-upload");
   const uploadInput = document.getElementById("upload-input");
@@ -77,6 +78,8 @@
   let fontsize = clampFont(parseInt(localStorage.getItem("myttty.fontsize") || "14", 10) || 14);
   let splitX = parseFloat(localStorage.getItem("myttty.splitX") || "0.5") || 0.5;
   let splitY = parseFloat(localStorage.getItem("myttty.splitY") || "0.5") || 0.5;
+  let filesWidth = parseInt(localStorage.getItem("myttty.filesWidth") || "300", 10);
+  if (!Number.isFinite(filesWidth)) filesWidth = 300;
   let uploader = null; // { xhr, id, cancelled }
 
   function clampFont(n) {
@@ -976,6 +979,39 @@
     if (text) notice._t = setTimeout(() => (noticeEl.textContent = ""), 4000);
   }
 
+  function setFilesWidth(next, persist = false) {
+    const body = filesEl.parentElement;
+    const max = Math.max(200, body.clientWidth - 320);
+    filesWidth = Math.round(Math.min(Math.max(next, 180), max));
+    filesEl.style.setProperty("--files-width", `${filesWidth}px`);
+    if (persist) {
+      try {
+        localStorage.setItem("myttty.filesWidth", String(filesWidth));
+      } catch (_) {}
+    }
+  }
+
+  function startFilesResize(ev) {
+    ev.preventDefault();
+    const el = filesResizeEl;
+    el.setPointerCapture(ev.pointerId);
+    el.classList.add("dragging");
+    const bodyLeft = filesEl.parentElement.getBoundingClientRect().left;
+
+    const move = (e) => setFilesWidth(e.clientX - bodyLeft);
+    const up = () => {
+      el.classList.remove("dragging");
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      setFilesWidth(filesWidth, true);
+    };
+
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  }
+
   async function refreshFiles() {
     notice("");
     const dirs = new Set(["", currentDir, ...treeExpanded]);
@@ -1664,6 +1700,7 @@
   });
   filesBtn.addEventListener("click", () => {
     filesEl.hidden = !filesEl.hidden;
+    filesResizeEl.hidden = filesEl.hidden;
     if (!filesEl.hidden) {
       refreshFiles();
       requestAnimationFrame(() => panes.forEach(fitPane));
@@ -1672,6 +1709,9 @@
   document.getElementById("files-refresh").addEventListener("click", refreshFiles);
   document.getElementById("files-new-file").addEventListener("click", newFile);
   document.getElementById("files-new-dir").addEventListener("click", newDir);
+  filesResizeEl.addEventListener("pointerdown", startFilesResize);
+  filesResizeEl.addEventListener("dblclick", () => setFilesWidth(300, true));
+  setFilesWidth(filesWidth);
 
   uploadBtn.addEventListener("click", () => uploadInput.click());
   uprogCancel.addEventListener("click", () => {
@@ -1709,6 +1749,7 @@
   ro.observe(workspace);
 
   window.addEventListener("resize", () => {
+    setFilesWidth(filesWidth);
     panes.forEach(fitPane);
     layoutTabs();
   });

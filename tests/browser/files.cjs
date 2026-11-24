@@ -30,6 +30,24 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.click("#toggle-files");
   await page.waitForSelector("#file-list");
 
+  // 文件面板宽度可拖拽。
+  const widthBefore = await page.evaluate(
+    () => document.querySelector("#files").getBoundingClientRect().width
+  );
+  const handle = page.locator("#files-resize");
+  const handleBox = await handle.boundingBox();
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBox.x + handleBox.width / 2 + 70, handleBox.y + handleBox.height / 2, {
+    steps: 5,
+  });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const widthAfter = await page.evaluate(
+    () => document.querySelector("#files").getBoundingClientRect().width
+  );
+  assert(widthAfter > widthBefore + 40, "file panel width is resizable");
+
   // 新建文件名必须是应用内弹窗，而不是原生 prompt。
   await page.click("#files-new-file");
   await page.waitForSelector("#prompt-overlay:not([hidden])");
