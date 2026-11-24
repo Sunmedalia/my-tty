@@ -1292,8 +1292,10 @@
       const caret = document.createElement("button");
       caret.type = "button";
       caret.className = "caret";
-      caret.textContent = open ? "▾" : "▸";
+      caret.classList.toggle("open", open);
+      caret.appendChild(iconNode("chevron"));
       caret.title = open ? "折叠" : "展开";
+      caret.setAttribute("aria-label", caret.title);
       caret.addEventListener("click", (ev) => {
         ev.stopPropagation();
         toggleDir(path);
@@ -1409,6 +1411,7 @@
     download: ["M8 2.5v8", "M4.5 7 8 10.5 11.5 7", "M3.5 13h9"],
     rename: ["M3 13l1-3 7-7 2 2-7 7z", "M9.5 3.5l2 2"],
     delete: ["M4 4l8 8", "M12 4l-8 8"],
+    chevron: ["M6 4l4 4-4 4"],
   };
 
   function iconNode(name) {

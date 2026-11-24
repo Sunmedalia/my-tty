@@ -534,6 +534,9 @@ button.icon {
 
 #file-list .entry .caret {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 16px;
   height: 18px;
   padding: 0;
@@ -542,6 +545,16 @@ button.icon {
   color: var(--dim);
   font-size: 11px;
   line-height: 1;
+}
+
+#file-list .entry .caret .ico {
+  width: 10px;
+  height: 10px;
+  transition: transform 120ms;
+}
+
+#file-list .entry .caret.open .ico {
+  transform: rotate(90deg);
 }
 
 #file-list .entry .caret:hover {
