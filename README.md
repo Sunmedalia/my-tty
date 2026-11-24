@@ -118,7 +118,8 @@ HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 4 屏 2×2。每个 pane 是独立的终端、WebSocket 和 PTY，关闭 pane 会回收对应 shell。
 分栏可以拖拽；pane 右上角可最大化；`Ctrl+Shift+F` 搜索，`Ctrl+Shift+±` 调整字号，
 `F3` 下一个匹配。移动端会显示 Esc/Tab/Ctrl/方向键/^C/^D/^L 按键条；
-触摸设备上文件行的下载/重命名/删除按钮常显，顶栏在窄屏下收紧并预留底部安全区。
+触摸设备上文件行的下载/重命名/删除按钮常显，顶栏在窄屏下收紧并预留底部安全区；
+pane 标题栏改为固定在终端上方（不再悬浮遮挡内容），最大化按钮仅在桌面显示。
 
 复制/粘贴是终端语义：
 

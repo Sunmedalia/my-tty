@@ -791,6 +791,38 @@ button.icon {
 
 /* 触摸设备没有 hover：文件操作必须常显，点击区域也要够大。 */
 @media (hover: none), (pointer: coarse) {
+  /* 悬浮标题栏在手机上会盖住终端首行；改成固定在 pane 顶部。
+     手机屏幕小，最大化按钮没有实际收益，直接隐藏。 */
+  .pane-bar {
+    position: static;
+    order: -1;
+    max-width: none;
+    height: 26px;
+    padding: 0 6px;
+    background: var(--panel);
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    border-radius: 0;
+    box-shadow: none;
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+
+  .pane-status {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .pane-max {
+    display: none;
+  }
+
+  .pane-close {
+    min-width: 30px;
+    min-height: 24px;
+  }
+
   #bar {
     height: 44px;
   }
