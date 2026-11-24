@@ -205,14 +205,6 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$API/list?path=
 [ "$code" = "401" ]
 pass "logout invalidates session"
 
-echo "== login rate limit =="
-for _ in 1 2 3 4 5; do
-  curl -sS -o /dev/null -H 'content-type: application/json' -d '{"password":"bad"}' "$BASE/api/auth/login"
-done
-code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -d '{"password":"bad"}' "$BASE/api/auth/login")
-[ "$code" = "429" ]
-pass "login rate limit"
-
 echo "== graceful shutdown =="
 kill -TERM "$PID"
 wait "$PID" 2>/dev/null || true

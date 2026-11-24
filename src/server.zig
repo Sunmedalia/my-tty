@@ -181,7 +181,6 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     defer gpa.free(fs.root);
 
     var auth_state = auth.Auth.init(io, cfg.password orelse unreachable, cfg.session_ttl_days, cfg.session_idle_hours);
-    var limiter: LoginLimiter = .{ .io = io };
     var manager = session.Manager.init(io, gpa, cfg, fs.root);
     defer manager.deinit();
 
@@ -227,7 +226,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
 
         connAdd(io, stream.socket.handle);
         const thread = std.Thread.spawn(.{}, connectionMain, .{
-            io, gpa, stream, cfg, &fs, &auth_state, &limiter, &manager,
+            io, gpa, stream, cfg, &fs, &auth_state, &manager,
         }) catch {
             connRemove(io, stream.socket.handle);
             _ = active_connections.fetchSub(1, .acq_rel);
@@ -244,7 +243,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     if (maint) |t| t.join();
 
     std.debug.print("正在退出：回收 shell…\n", .{});
-    // fs/auth_state/limiter/manager 都在本函数的栈上，绝不能在线程还在使用时返回。
+    // fs/auth_state/manager 都在本函数的栈上，绝不能在线程还在使用时返回。
     var waited: u32 = 0;
     while (active_connections.load(.acquire) > 0 and waited < 500) : (waited += 1) {
         Io.sleep(io, Io.Duration.fromMilliseconds(10), .real) catch break;
@@ -292,7 +291,6 @@ fn connectionMain(
     cfg: *const config.Config,
     fs: *const fsapi.Fs,
     auth_state: *auth.Auth,
-    limiter: *LoginLimiter,
     manager: *session.Manager,
 ) void {
     defer {
@@ -341,7 +339,7 @@ fn connectionMain(
                 return;
             },
             .none => {
-                handleHttp(io, gpa, cfg, fs, auth_state, limiter, peer, stream.socket.handle, &request) catch return;
+                handleHttp(io, gpa, cfg, fs, auth_state, peer, stream.socket.handle, &request) catch return;
                 // 客户端要求关闭，或请求 body 没有干净读完时，绝不能在同一个连接上
                 // 继续解析下一段字节：残余 body 会被当成新请求（请求走私/响应错位）。
                 if (!request.head.keep_alive) return;
@@ -360,7 +358,6 @@ fn handleHttp(
     cfg: *const config.Config,
     fs: *const fsapi.Fs,
     auth_state: *auth.Auth,
-    limiter: *LoginLimiter,
     peer: net.IpAddress,
     fd: posix.fd_t,
     request: *http.Server.Request,
@@ -391,7 +388,7 @@ fn handleHttp(
         // 给整个请求 10 秒上限，挡住慢 body 占住连接线程。
         connSetDeadline(io, fd, 10);
         defer connClearDeadline(io, fd);
-        return handleLogin(io, gpa, cfg, auth_state, limiter, peer, trust_forwarded, request);
+        return handleLogin(gpa, cfg, auth_state, trust_forwarded, request);
     }
 
     // 其余所有 API（含注销、状态、票据）都必须先通过会话认证。
@@ -434,31 +431,13 @@ const LoginRequest = struct {
 };
 
 fn handleLogin(
-    io: Io,
     gpa: Allocator,
     cfg: *const config.Config,
     auth_state: *auth.Auth,
-    limiter: *LoginLimiter,
-    peer: net.IpAddress,
     trust_forwarded: bool,
     request: *http.Server.Request,
 ) !void {
     if (request.head.method != .POST) return respondClose(request, "method not allowed\n", .method_not_allowed);
-
-    if (limiter.blockedSeconds(peer)) |retry| {
-        var retry_buf: [24]u8 = undefined;
-        const retry_text = std.fmt.bufPrint(&retry_buf, "{d}", .{retry}) catch "60";
-        var headers: [8]http.Header = undefined;
-        const list = buildHeaders(&headers, &.{
-            .{ .name = "content-type", .value = "application/json; charset=utf-8" },
-            .{ .name = "retry-after", .value = retry_text },
-        });
-        return request.respond("{\"error\":\"too_many_attempts\"}", .{
-            .status = .too_many_requests,
-            .extra_headers = list,
-            .keep_alive = false,
-        });
-    }
 
     // 读 body 之后 head/header 迭代器不再可用，先把 Cookie 相关判断做掉。
     const secure = auth.isSecureRequest(request, trust_forwarded);
@@ -480,22 +459,8 @@ fn handleLogin(
         return respond(request, "{\"error\":\"bad_body\"}\n", .bad_request);
     defer parsed.deinit();
 
-    const login = auth_state.login(parsed.value.password) orelse {
-        // 简单延迟，降低在线爆破速度；不阻塞其它连接线程。
-        Io.sleep(io, Io.Duration.fromMilliseconds(250), .real) catch {};
-        if (limiter.noteFailure(peer)) |retry| {
-            var retry_buf: [24]u8 = undefined;
-            const retry_text = std.fmt.bufPrint(&retry_buf, "{d}", .{retry}) catch "60";
-            var headers: [8]http.Header = undefined;
-            const list = buildHeaders(&headers, &.{
-                .{ .name = "content-type", .value = "application/json; charset=utf-8" },
-                .{ .name = "retry-after", .value = retry_text },
-            });
-            return request.respond("{\"error\":\"too_many_attempts\"}", .{ .status = .too_many_requests, .extra_headers = list });
-        }
+    const login = auth_state.login(parsed.value.password) orelse
         return respond(request, "{\"error\":\"invalid_password\"}\n", .unauthorized);
-    };
-    limiter.noteSuccess(peer);
 
     const ttl_seconds: i64 = @as(i64, @intCast(cfg.session_ttl_days)) * 86400;
     var cookie_buf: [256]u8 = undefined;
@@ -547,100 +512,6 @@ fn handleStatus(auth_state: *auth.Auth, request: *http.Server.Request) !void {
     if (request.head.method != .GET) return respond(request, "method not allowed\n", .method_not_allowed);
     return respond(request, "{\"authenticated\":true}", .ok);
 }
-
-// ---------------------------------------------------------------------------
-// 登录限流
-// ---------------------------------------------------------------------------
-
-const LoginLimiter = struct {
-    io: Io,
-    mutex: Io.Mutex = .init,
-    entries: [32]Entry = @splat(.{}),
-
-    const Entry = struct {
-        ip: net.IpAddress = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
-        used: bool = false,
-        failures: u32 = 0,
-        window_ns: i96 = 0,
-        blocked_until_ns: i96 = 0,
-    };
-
-    const window_ns: i96 = 10 * 60 * std.time.ns_per_s;
-    const block_ns: i96 = 5 * 60 * std.time.ns_per_s;
-    const max_failures = 5;
-
-    fn now(self: *LoginLimiter) i96 {
-        return Io.Clock.real.now(self.io).nanoseconds;
-    }
-
-    fn key(ip: net.IpAddress) net.IpAddress {
-        var k = ip;
-        k.setPort(0);
-        return k;
-    }
-
-    fn find(self: *LoginLimiter, k: net.IpAddress) ?usize {
-        for (&self.entries, 0..) |*e, i| {
-            if (e.used and net.IpAddress.eql(&e.ip, &k)) return i;
-        }
-        return null;
-    }
-
-    fn slot(self: *LoginLimiter, k: net.IpAddress) usize {
-        if (self.find(k)) |i| return i;
-        for (&self.entries, 0..) |*e, i| {
-            if (!e.used) return i;
-        }
-        var oldest: usize = 0;
-        var oldest_ns: i96 = std.math.maxInt(i96);
-        for (&self.entries, 0..) |*e, i| {
-            if (e.window_ns < oldest_ns) {
-                oldest_ns = e.window_ns;
-                oldest = i;
-            }
-        }
-        return oldest;
-    }
-
-    fn blockedSeconds(self: *LoginLimiter, ip: net.IpAddress) ?u32 {
-        const k = key(ip);
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
-        const i = self.find(k) orelse return null;
-        const wait_ns = self.entries[i].blocked_until_ns - self.now();
-        if (wait_ns <= 0) return null;
-        return @intCast(@divTrunc(wait_ns, std.time.ns_per_s) + 1);
-    }
-
-    /// 返回非 null 表示该 IP 已被封禁。
-    fn noteFailure(self: *LoginLimiter, ip: net.IpAddress) ?u32 {
-        const k = key(ip);
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
-        const i = self.slot(k);
-        const e = &self.entries[i];
-        const ts = self.now();
-        if (!e.used or ts - e.window_ns > window_ns) {
-            e.* = .{ .ip = k, .used = true, .window_ns = ts };
-        }
-        e.failures += 1;
-        if (e.failures >= max_failures) {
-            e.failures = 0;
-            e.blocked_until_ns = ts + block_ns;
-            return @intCast(@divTrunc(block_ns, std.time.ns_per_s));
-        }
-        return null;
-    }
-
-    fn noteSuccess(self: *LoginLimiter, ip: net.IpAddress) void {
-        const k = key(ip);
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.find(k)) |i| self.entries[i] = .{};
-    }
-};
 
 // ---------------------------------------------------------------------------
 // 小工具
