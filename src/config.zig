@@ -195,7 +195,8 @@ fn loadConfigFile(
         return error.ConfigReadFailed;
     };
 
-    var parsed = std.json.parseFromSlice(Config.FileConfig, alloc, bytes, .{}) catch
+    // 忽略未知字段：旧配置里的 "root" 之类的历史键不会阻止启动。
+    var parsed = std.json.parseFromSlice(Config.FileConfig, alloc, bytes, .{ .ignore_unknown_fields = true }) catch
         return error.ConfigInvalid;
     defer parsed.deinit();
 
