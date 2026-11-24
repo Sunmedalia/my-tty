@@ -421,6 +421,10 @@ button:focus-visible {
   color: #4a5268;
 }
 
+#crumb button.active {
+  color: var(--fg);
+}
+
 button.icon {
   padding: 2px 7px;
   font-size: 13px;
@@ -435,6 +439,52 @@ button.icon {
   overflow-y: auto;
   flex: 1 1 auto;
   min-height: 0;
+}
+
+#file-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#file-list .tree-children {
+  margin-left: 13px;
+  padding-left: 4px;
+  border-left: 1px solid #252b38;
+}
+
+#file-list .tree-node {
+  list-style: none;
+}
+
+#file-list .entry .caret {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1;
+}
+
+#file-list .entry .caret:hover {
+  color: var(--fg);
+  background: transparent;
+}
+
+#file-list .entry .caret-spacer {
+  flex: 0 0 16px;
+  width: 16px;
+}
+
+#file-list .entry.selected {
+  background: #222b3c;
+}
+
+#file-list .entry.selected .name {
+  color: var(--fg);
 }
 
 #file-list .entry {
@@ -1224,6 +1274,17 @@ button.icon {
 
   #file-list .entry .name {
     padding: 5px 4px;
+  }
+
+  #file-list .entry .caret {
+    width: 22px;
+    height: 26px;
+    font-size: 13px;
+  }
+
+  #file-list .entry .caret-spacer {
+    flex-basis: 22px;
+    width: 22px;
   }
 
   #file-list .entry .actions {

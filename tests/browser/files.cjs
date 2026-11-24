@@ -58,6 +58,12 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.click("#files-refresh");
   await page.waitForFunction(() => document.querySelector("#file-list").innerText.includes("arch"));
   const dirRow = page.locator("#file-list .entry.directory", { hasText: "arch" });
+  await dirRow.locator(".caret").click();
+  await page.waitForFunction(
+    () => [...document.querySelectorAll("#file-list .entry.file")].some((el) => el.textContent.includes("x.txt")),
+    null,
+    { timeout: 8000 }
+  );
   await dirRow.hover();
   const [tar] = await Promise.all([
     page.waitForEvent("download"),
