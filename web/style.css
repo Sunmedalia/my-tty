@@ -444,12 +444,21 @@ button.icon {
 }
 
 #files-cwd-sync {
-  color: var(--accent);
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--line));
+  background: color-mix(in srgb, var(--ok) 18%, #1d2230);
 }
 
-#files-cwd-sync.off {
+#files-cwd-sync:hover {
+  background: color-mix(in srgb, var(--ok) 28%, #1d2230);
+}
+
+#files-cwd-sync.off,
+#files-cwd-sync.off:hover {
   color: var(--dim);
-  opacity: 0.5;
+  border-color: var(--line);
+  background: #1d2230;
+  opacity: 0.55;
 }
 
 #file-list {

@@ -90,11 +90,18 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   );
 
   // 关闭目录跟随后，cd 不再移动文件树。
+  const syncBgOn = await page.evaluate(
+    () => getComputedStyle(document.querySelector("#files-cwd-sync")).backgroundColor
+  );
   await page.click("#files-cwd-sync");
   assert(
     (await page.getAttribute("#files-cwd-sync", "aria-pressed")) === "false",
     "cwd sync can be turned off"
   );
+  const syncBgOff = await page.evaluate(
+    () => getComputedStyle(document.querySelector("#files-cwd-sync")).backgroundColor
+  );
+  assert(syncBgOn !== syncBgOff, "cwd sync on/off state is visually distinct");
   await page.locator("#crumb button").first().click();
   await waitCrumb("/");
   await page.locator(".pane-term").click();
