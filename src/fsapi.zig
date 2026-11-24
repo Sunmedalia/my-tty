@@ -190,6 +190,9 @@ fn write(io: Io, gpa: Allocator, arena: Allocator, request: *http.Server.Request
     atomic.file.writeStreamingAll(io, body) catch |err| return failMapped(request, arena, err);
     atomic.replace(io) catch |err| return failMapped(request, arena, err);
 
+    var pb: [256]u8 = undefined;
+    std.debug.print("写入 /{s} ({d} B)\n", .{ logText(&pb, rel), body.len });
+
     const Payload = struct { ok: bool, path: []const u8, size: usize };
     return respondJson(request, arena, .ok, Payload{ .ok = true, .path = rel, .size = body.len });
 }
@@ -201,6 +204,10 @@ fn makeDir(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const abs = joinAbs(arena, "/", rel) catch |err| return failMapped(request, arena, err);
 
     Dir.cwd().createDirPath(io, abs) catch |err| return failMapped(request, arena, err);
+
+    var pb: [256]u8 = undefined;
+    std.debug.print("新建目录 /{s}\n", .{logText(&pb, rel)});
+
     const Payload = struct { ok: bool };
     return respondJson(request, arena, .ok, Payload{ .ok = true });
 }
@@ -217,6 +224,11 @@ fn rename(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     if (std.mem.eql(u8, from_abs, "/")) return fail(request, arena, .forbidden, "cannot_move_root");
 
     Dir.rename(.cwd(), from_abs, .cwd(), to_abs, io) catch |err| return failMapped(request, arena, err);
+
+    var fb: [256]u8 = undefined;
+    var tb: [256]u8 = undefined;
+    std.debug.print("重命名 /{s} -> /{s}\n", .{ logText(&fb, from_rel), logText(&tb, to_rel) });
+
     const Payload = struct { ok: bool };
     return respondJson(request, arena, .ok, Payload{ .ok = true });
 }
@@ -235,6 +247,10 @@ fn delete(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     } else {
         Dir.cwd().deleteFile(io, abs) catch |err| return failMapped(request, arena, err);
     }
+
+    var pb: [256]u8 = undefined;
+    std.debug.print("删除 /{s}\n", .{logText(&pb, rel)});
+
     const Payload = struct { ok: bool };
     return respondJson(request, arena, .ok, Payload{ .ok = true });
 }
@@ -280,10 +296,13 @@ fn uploadSingle(io: Io, arena: Allocator, rel: []const u8, request: *http.Server
         atomic.file.writeStreamingAll(io, chunk[0..n]) catch |err| return failMapped(request, arena, err);
     }
 
-    // 同上：body 不完整时保留临时文件交给清理线程，不要覆盖目标文件。
+    // 同上：body 不完整时保留临时文件，不要覆盖目标文件。
     if (!bodyComplete(request)) return failClose(request, arena, .bad_request, "bad_body");
 
     atomic.replace(io) catch |err| return failMapped(request, arena, err);
+
+    var pb: [256]u8 = undefined;
+    std.debug.print("上传 /{s} ({d} B)\n", .{ logText(&pb, rel), total });
 
     const Payload = struct { ok: bool, done: bool, path: []const u8, offset: u64 };
     return respondJson(request, arena, .ok, Payload{ .ok = true, .done = true, .path = rel, .offset = total });
@@ -367,6 +386,10 @@ fn uploadChunk(io: Io, arena: Allocator, rel: []const u8, id: []const u8, reques
     }
 
     Dir.rename(.cwd(), temp, .cwd(), abs, io) catch |err| return failMapped(request, arena, err);
+
+    var pb: [256]u8 = undefined;
+    std.debug.print("上传 /{s} ({d} B)\n", .{ logText(&pb, rel), total });
+
     const Payload = struct { ok: bool, done: bool, path: []const u8, offset: u64 };
     return respondJson(request, arena, .ok, Payload{ .ok = true, .done = true, .path = rel, .offset = total });
 }
@@ -585,6 +608,13 @@ fn download(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     // Content-Length 和 keep-alive 的帧边界。
     file_reader.interface.streamExact64(&body.writer, st.size) catch |err| return err;
     return body.end();
+}
+
+/// 日志里的路径：控制字符换成 `?`，避免文件名伪造日志行。
+fn logText(buf: []u8, raw: []const u8) []const u8 {
+    const n = @min(raw.len, buf.len);
+    for (raw[0..n], 0..) |c, i| buf[i] = if (c < 0x20 or c == 0x7f) '?' else c;
+    return buf[0..n];
 }
 
 fn basename(path: []const u8) []const u8 {

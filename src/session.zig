@@ -399,6 +399,9 @@ pub const Manager = struct {
             _ = linux.close(spawned.master);
             return err;
         };
+
+        const sid = std.fmt.bytesToHex(s.id[0..4].*, .lower);
+        std.debug.print("会话创建 sid={s} pid={d}\n", .{ sid[0..], s.child });
         return s;
     }
 
@@ -418,6 +421,8 @@ pub const Manager = struct {
     }
 
     fn destroyLocked(self: *Manager, s: *Session) void {
+        const sid = std.fmt.bytesToHex(s.id[0..4].*, .lower);
+        std.debug.print("会话回收 sid={s} pid={d}\n", .{ sid[0..], s.child });
         for (self.sessions.items, 0..) |item, i| {
             if (item == s) {
                 _ = self.sessions.swapRemove(i);

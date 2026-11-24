@@ -312,9 +312,14 @@ fn connectionMain(
                 const sid = session.parseSessionId(util.queryParam(request.head.target, "session"));
                 const resume_offset = session.parseOffset(util.queryParam(request.head.target, "offset"));
                 var ws = request.respondWebSocket(.{ .key = key }) catch return;
-                session.serve(io, manager, &ws, &stream, sid, resume_offset) catch |err| {
-                    std.debug.print("会话结束: {t}\n", .{err});
-                };
+                var peer_buf: [64]u8 = undefined;
+                const peer_name = peerText(&peer_buf, peer);
+                std.debug.print("ws 连接 peer={s}\n", .{peer_name});
+                if (session.serve(io, manager, &ws, &stream, sid, resume_offset)) |_| {
+                    std.debug.print("ws 断开 peer={s}\n", .{peer_name});
+                } else |err| {
+                    std.debug.print("ws 断开 peer={s}: {t}\n", .{ peer_name, err });
+                }
                 return;
             },
             .other => {
@@ -370,7 +375,7 @@ fn handleHttp(
         // 给整个请求 10 秒上限，挡住慢 body 占住连接线程。
         connSetDeadline(io, fd, 10);
         defer connClearDeadline(io, fd);
-        return handleLogin(gpa, cfg, auth_state, trust_forwarded, request);
+        return handleLogin(gpa, cfg, auth_state, peer, trust_forwarded, request);
     }
 
     // 其余所有 API（含注销、状态、票据）都必须先通过会话认证。
@@ -416,6 +421,7 @@ fn handleLogin(
     gpa: Allocator,
     cfg: *const config.Config,
     auth_state: *auth.Auth,
+    peer: net.IpAddress,
     trust_forwarded: bool,
     request: *http.Server.Request,
 ) !void {
@@ -441,8 +447,15 @@ fn handleLogin(
         return respond(request, "{\"error\":\"bad_body\"}\n", .bad_request);
     defer parsed.deinit();
 
-    const login = auth_state.login(parsed.value.password) orelse
+    const login = auth_state.login(parsed.value.password) orelse {
+        var pb: [64]u8 = undefined;
+        std.debug.print("登录失败 peer={s}\n", .{peerText(&pb, peer)});
         return respond(request, "{\"error\":\"invalid_password\"}\n", .unauthorized);
+    };
+    {
+        var pb: [64]u8 = undefined;
+        std.debug.print("登录成功 peer={s}\n", .{peerText(&pb, peer)});
+    }
 
     const ttl_seconds: i64 = @as(i64, @intCast(cfg.session_ttl_days)) * 86400;
     var cookie_buf: [256]u8 = undefined;
@@ -512,6 +525,20 @@ fn wsAuthorized(auth_state: *auth.Auth, request: *const http.Server.Request) boo
         if (auth_state.consumeTicket(ticket)) return true;
     }
     return authorized(auth_state, request);
+}
+
+/// 日志里的客户端 IP（不带临时端口）。
+fn peerText(buf: []u8, peer: net.IpAddress) []const u8 {
+    return switch (peer) {
+        .ip4 => |a| std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
+            a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3],
+        }) catch "?",
+        .ip6 => blk: {
+            var w: Io.Writer = .fixed(buf);
+            peer.format(&w) catch break :blk "?";
+            break :blk w.buffered();
+        },
+    };
 }
 
 /// 对端是否为本机（127.0.0.0/8 或 ::1）。
