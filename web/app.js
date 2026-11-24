@@ -14,6 +14,7 @@
   const filesBtn = document.getElementById("toggle-files");
   const filesEl = document.getElementById("files");
   const filesResizeEl = document.getElementById("files-resize");
+  const cwdSyncBtn = document.getElementById("files-cwd-sync");
   const crumbEl = document.getElementById("crumb");
   const uploadBtn = document.getElementById("files-upload");
   const uploadInput = document.getElementById("upload-input");
@@ -73,6 +74,7 @@
   const treeChildren = new Map();
   const treeLoading = new Set();
   let treeRootError = false;
+  let cwdSyncEnabled = localStorage.getItem("myttty.cwdSync") !== "0";
   let editing = null; // { path, dirty }
   let started = false;
   let fontsize = clampFont(parseInt(localStorage.getItem("myttty.fontsize") || "14", 10) || 14);
@@ -294,7 +296,7 @@
     layoutTabs();
     updateSummary();
     saveSessions();
-    if (activePane && activePane.cwd) syncFilesToCwd(activePane.cwd);
+    if (cwdSyncEnabled && activePane && activePane.cwd) syncFilesToCwd(activePane.cwd);
     requestAnimationFrame(() => {
       for (const p of tab.panes) fitPane(p);
       if (activePane && !coarsePointer) activePane.term.focus();
@@ -533,7 +535,7 @@
     activePane = pane;
     if (pane.tab) pane.tab.activePane = pane;
     for (const p of panes) p.el.classList.toggle("active", p === pane);
-    if (pane.cwd) syncFilesToCwd(pane.cwd);
+    if (cwdSyncEnabled && pane.cwd) syncFilesToCwd(pane.cwd);
     pane.term.focus();
   }
 
@@ -663,7 +665,7 @@
       } else if (msg.t === "cwd") {
         if (typeof msg.path === "string") {
           pane.cwd = msg.path;
-          if (pane === activePane) syncFilesToCwd(msg.path);
+          if (cwdSyncEnabled && pane === activePane) syncFilesToCwd(msg.path);
         }
       } else if (msg.t === "gap") {
         notice(`缓冲区已满，丢弃了 ${msg.lost} 字节历史输出`, true);
@@ -1010,6 +1012,22 @@
         localStorage.setItem("myttty.filesWidth", String(filesWidth));
       } catch (_) {}
     }
+  }
+
+  function setCwdSync(enabled, persist = true) {
+    cwdSyncEnabled = enabled;
+    cwdSyncBtn.classList.toggle("off", !enabled);
+    cwdSyncBtn.setAttribute("aria-pressed", enabled ? "true" : "false");
+    cwdSyncBtn.title = enabled ? "目录跟随：开（点击关闭）" : "目录跟随：关（点击开启）";
+    if (persist) {
+      try {
+        localStorage.setItem("myttty.cwdSync", enabled ? "1" : "0");
+      } catch (_) {}
+    }
+    if (!enabled || !activePane) return;
+    // 重新开启时立即对齐；请求一次 cwd 覆盖关闭期间发生的 cd。
+    if (activePane.cwd) syncFilesToCwd(activePane.cwd);
+    requestCwd(activePane);
   }
 
   function startFilesResize(ev) {
@@ -1767,6 +1785,8 @@
     }
   });
   document.getElementById("files-refresh").addEventListener("click", refreshFiles);
+  cwdSyncBtn.addEventListener("click", () => setCwdSync(!cwdSyncEnabled));
+  setCwdSync(cwdSyncEnabled, false);
   document.getElementById("files-new-file").addEventListener("click", newFile);
   document.getElementById("files-new-dir").addEventListener("click", newDir);
   filesResizeEl.addEventListener("pointerdown", startFilesResize);

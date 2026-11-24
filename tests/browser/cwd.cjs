@@ -1,4 +1,5 @@
-// 终端 cwd 同步：cd 后文件树跟随并滚动到可见位置；手动回到根目录后执行 pwd 会重新同步。
+// 终端 cwd 同步：cd 后文件树跟随并滚动到可见位置；手动回到根目录后执行 pwd 会重新同步；
+// 刷新旁的跟随开关可以关闭/重新开启同步。
 const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
@@ -87,6 +88,27 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
     null,
     { timeout: 10000 }
   );
+
+  // 关闭目录跟随后，cd 不再移动文件树。
+  await page.click("#files-cwd-sync");
+  assert(
+    (await page.getAttribute("#files-cwd-sync", "aria-pressed")) === "false",
+    "cwd sync can be turned off"
+  );
+  await page.locator("#crumb button").first().click();
+  await waitCrumb("/");
+  await page.locator(".pane-term").click();
+  await page.keyboard.type(`cd '${sub}'\r`);
+  await page.waitForTimeout(1200);
+  assert((await activeCrumb()) === "/", "tree stays put when cwd sync is off");
+
+  // 重新开启：立即对齐到 shell 当前目录，不需要等到下一次 cd。
+  await page.click("#files-cwd-sync");
+  assert(
+    (await page.getAttribute("#files-cwd-sync", "aria-pressed")) === "true",
+    "cwd sync can be turned back on"
+  );
+  await waitCrumb("cwd-sub");
 
   assert(errors.length === 0, "console errors: " + errors.join(" | "));
   console.log("cwd: PASS");
