@@ -98,6 +98,12 @@ button:focus-visible {
   flex: 1 1 auto;
 }
 
+#bar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 #status.ok {
   color: var(--ok);
 }
@@ -438,9 +444,22 @@ button:focus-visible {
 }
 
 button.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 2px 7px;
   font-size: 13px;
   line-height: 1.4;
+}
+
+/* 文件工具栏固定成方形，避免不同符号宽度导致图标看着偏心。 */
+.files-head button.icon {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
 }
 
 #files-cwd-sync {

@@ -30,6 +30,19 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.click("#toggle-files");
   await page.waitForSelector("#file-list");
 
+  // 文件工具栏的图标按钮是等宽高方形，避免不同符号宽度造成偏心。
+  const iconSizes = await page.evaluate(() =>
+    [...document.querySelectorAll(".files-head button.icon")].map((btn) => {
+      const r = btn.getBoundingClientRect();
+      return { w: r.width, h: r.height };
+    })
+  );
+  assert(iconSizes.length >= 5, "files toolbar has icon buttons");
+  assert(
+    iconSizes.every((s) => Math.abs(s.w - s.h) <= 1),
+    "files toolbar icons are square: " + JSON.stringify(iconSizes)
+  );
+
   // 文件面板宽度可拖拽。
   const widthBefore = await page.evaluate(
     () => document.querySelector("#files").getBoundingClientRect().width
