@@ -27,6 +27,12 @@
   const loginPassword = document.getElementById("login-password");
   const loginError = document.getElementById("login-error");
   const loginSubmit = document.getElementById("login-submit");
+  const promptOverlay = document.getElementById("prompt-overlay");
+  const promptForm = document.getElementById("prompt-form");
+  const promptTitle = document.getElementById("prompt-title");
+  const promptInput = document.getElementById("prompt-input");
+  const promptError = document.getElementById("prompt-error");
+  const promptCancel = document.getElementById("prompt-cancel");
   const findBar = document.getElementById("find-bar");
   const findInput = document.getElementById("find-input");
   const findCount = document.getElementById("find-count");
@@ -524,8 +530,10 @@
       splitters.v.style.left = `${splitX * 100}%`;
     }
     if (splitters.h) {
-      splitters.h.hidden = n !== 4;
+      // 3 屏时只有右列上下分，横把手从竖直分栏处开始，避免切到左边整高的 pane。
+      splitters.h.hidden = n < 3;
       splitters.h.style.top = `${splitY * 100}%`;
+      splitters.h.style.left = n === 3 ? `${splitX * 100}%` : "0";
     }
   }
 
@@ -536,7 +544,7 @@
     const cols = n >= 2 ? `${splitX}fr ${1 - splitX}fr` : "1fr";
     if (n === 3) {
       workspace.style.gridTemplateColumns = cols;
-      workspace.style.gridTemplateRows = "1fr 1fr";
+      workspace.style.gridTemplateRows = `${splitY}fr ${1 - splitY}fr`;
       panes[0].el.style.gridArea = "1 / 1 / span 2 / span 1";
     } else if (n === 4) {
       workspace.style.gridTemplateColumns = cols;
@@ -767,7 +775,7 @@
       }
 
       const renameBtn = smallButton("✎", "重命名", async () => {
-        const next = prompt("新名字", entry.name);
+        const next = await askText("重命名", entry.name);
         if (!next || next === entry.name) return;
         try {
           await api("POST", "rename", {
@@ -974,8 +982,49 @@
     refreshFiles();
   }
 
+  // 应用内文本输入弹窗；返回 null 表示取消。
+  function askText(title, initial = "") {
+    return new Promise((resolve) => {
+      promptTitle.textContent = title;
+      promptInput.value = initial;
+      promptError.textContent = "";
+      promptOverlay.hidden = false;
+      promptInput.focus();
+      promptInput.select();
+
+      const finish = (value) => {
+        promptOverlay.hidden = true;
+        promptForm.removeEventListener("submit", onSubmit);
+        promptForm.removeEventListener("keydown", onKey);
+        promptCancel.removeEventListener("click", onCancel);
+        resolve(value);
+      };
+      const onSubmit = (event) => {
+        event.preventDefault();
+        if (!promptInput.value) {
+          promptError.textContent = "名字不能为空";
+          promptInput.focus();
+          return;
+        }
+        finish(promptInput.value);
+      };
+      const onCancel = () => finish(null);
+      const onKey = (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          finish(null);
+        }
+      };
+
+      promptForm.addEventListener("submit", onSubmit);
+      promptForm.addEventListener("keydown", onKey);
+      promptCancel.addEventListener("click", onCancel);
+    });
+  }
+
   async function newFile() {
-    const name = prompt("新文件名");
+    const name = await askText("新建文件");
     if (!name) return;
     const path = joinPath(currentDir, name);
     try {
@@ -988,7 +1037,7 @@
   }
 
   async function newDir() {
-    const name = prompt("新目录名");
+    const name = await askText("新建目录");
     if (!name) return;
     try {
       await api("POST", "mkdir", { path: joinPath(currentDir, name) });
@@ -1054,6 +1103,7 @@
   editorSaveBtn.addEventListener("click", saveEditor);
   editorCloseBtn.addEventListener("click", closeEditor);
   window.addEventListener("keydown", (ev) => {
+    if (!promptOverlay.hidden) return;
     if (ev.key === "Escape" && !editorOverlay.hidden) {
       ev.preventDefault();
       closeEditor();
@@ -1088,6 +1138,7 @@
   });
 
   window.addEventListener("keydown", (ev) => {
+    if (!promptOverlay.hidden) return;
     const mod = ev.ctrlKey || ev.metaKey;
     if (mod && ev.shiftKey && (ev.key === "+" || ev.key === "=" || ev.code === "Equal")) {
       ev.preventDefault();

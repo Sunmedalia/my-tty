@@ -68,6 +68,18 @@
       </div>
     </div>
 
+    <div id="prompt-overlay" hidden>
+      <form id="prompt-form" class="prompt-card">
+        <h1 id="prompt-title">新建</h1>
+        <input id="prompt-input" type="text" autocomplete="off" spellcheck="false" />
+        <p id="prompt-error"></p>
+        <div class="prompt-actions">
+          <button id="prompt-cancel" type="button">取消</button>
+          <button id="prompt-ok" type="submit">确定</button>
+        </div>
+      </form>
+    </div>
+
     <div id="login-overlay" hidden>
       <form id="login-form" class="login-card">
         <h1>登录 my-tty</h1>

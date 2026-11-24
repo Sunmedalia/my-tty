@@ -30,6 +30,15 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.click("#toggle-files");
   await page.waitForSelector("#file-list");
 
+  // 新建文件名必须是应用内弹窗，而不是原生 prompt。
+  await page.click("#files-new-file");
+  await page.waitForSelector("#prompt-overlay:not([hidden])");
+  await page.fill("#prompt-input", "created-by-modal.txt");
+  await page.click("#prompt-ok");
+  await page.waitForSelector("#editor-overlay:not([hidden])");
+  await page.click("#editor-close");
+  await page.waitForTimeout(200);
+
   await page.setInputFiles("#upload-input", src);
   await page.waitForFunction(() => document.querySelector("#file-list").innerText.includes("my-tty-upload-src.bin"), null, { timeout: 20000 });
   const onDisk = fs.readFileSync(path.join(ROOT, "my-tty-upload-src.bin"));
