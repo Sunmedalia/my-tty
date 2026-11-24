@@ -135,7 +135,7 @@
       close.type = "button";
       close.className = "menu-close";
       close.title = "关闭标签页";
-      close.textContent = "✕";
+      close.appendChild(iconNode("delete"));
       close.addEventListener("click", (ev) => {
         ev.stopPropagation();
         closeTab(tab);
@@ -238,7 +238,7 @@
     close.type = "button";
     close.className = "tab-close";
     close.title = "关闭标签页";
-    close.textContent = "✕";
+    close.appendChild(iconNode("delete"));
 
     btn.appendChild(label);
     btn.appendChild(close);
@@ -338,7 +338,7 @@
       <div class="pane-bar">
         <span class="pane-dot"></span>
         <span class="pane-status">连接中…</span>
-        <button class="pane-close" type="button" title="关闭此分屏">✕</button>
+        <button class="pane-close" type="button" title="关闭此分屏" aria-label="关闭此分屏"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8"/><path d="M12 4l-8 8"/></svg></button>
       </div>
       <div class="pane-term"></div>`;
     tab.el.appendChild(el);
@@ -1328,13 +1328,13 @@
 
     if (isDir) {
       actions.appendChild(
-        smallButton("⤓", "下载目录（tar）", () => downloadArchive(path, entry.name))
+        smallButton("download", "下载目录（tar）", () => downloadArchive(path, entry.name))
       );
     } else {
-      actions.appendChild(smallButton("⤓", "下载", () => downloadFile(path, entry.name)));
+      actions.appendChild(smallButton("download", "下载", () => downloadFile(path, entry.name)));
     }
 
-    const renameBtn = smallButton("✎", "重命名", async () => {
+    const renameBtn = smallButton("rename", "重命名", async () => {
       const next = await askText("重命名", entry.name);
       if (!next || next === entry.name) return;
       const newPath = joinPath(parentPath, next);
@@ -1348,7 +1348,7 @@
     });
     actions.appendChild(renameBtn);
 
-    const delBtn = smallButton("✕", "删除", async () => {
+    const delBtn = smallButton("delete", "删除", async () => {
       if (!confirm(`删除 ${entry.name}？此操作不可撤销。`)) return;
       try {
         await api("DELETE", "delete", { path });
@@ -1405,12 +1405,33 @@
     return li;
   }
 
-  function smallButton(label, title, onClick) {
+  const actionIcons = {
+    download: ["M8 2.5v8", "M4.5 7 8 10.5 11.5 7", "M3.5 13h9"],
+    rename: ["M3 13l1-3 7-7 2 2-7 7z", "M9.5 3.5l2 2"],
+    delete: ["M4 4l8 8", "M12 4l-8 8"],
+  };
+
+  function iconNode(name) {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("class", "ico");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("aria-hidden", "true");
+    for (const d of actionIcons[name] || []) {
+      const p = document.createElementNS(ns, "path");
+      p.setAttribute("d", d);
+      svg.appendChild(p);
+    }
+    return svg;
+  }
+
+  function smallButton(icon, title, onClick) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "icon";
-    b.textContent = label;
     b.title = title;
+    b.setAttribute("aria-label", title);
+    b.appendChild(iconNode(icon));
     b.addEventListener("click", (ev) => {
       ev.stopPropagation();
       onClick();

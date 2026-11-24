@@ -18,17 +18,17 @@
         <button id="send-interrupt" class="icon" type="button" title="发送 Ctrl+C（中断，适用于 RDP 等 Ctrl 不可用的环境）">^C</button>
         <button id="font-dec" class="icon" type="button" title="缩小字号">A−</button>
         <button id="font-inc" class="icon" type="button" title="放大字号">A+</button>
-        <button id="toggle-files" type="button" title="文件">文件</button>
-        <button id="add-pane" type="button" title="新建分屏">+ 分屏</button>
-        <button id="logout" type="button" title="注销">注销</button>
+        <button id="toggle-files" type="button" title="文件" aria-label="文件"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 2.5h6l3 3v8h-9z"/><path d="M9.5 2.5v3h3"/><path d="M5.5 8.5h5M5.5 11h5"/></svg></button>
+        <button id="add-pane" type="button" title="新建分屏" aria-label="新建分屏"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3.5" width="11" height="9" rx="1"/><path d="M8 3.5v9"/></svg></button>
+        <button id="logout" type="button" title="注销" aria-label="注销"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5h-3v9h3"/><path d="M9 5.5 11.5 8 9 10.5"/><path d="M5.5 8h6"/></svg></button>
       </header>
 
       <div id="main">
         <div id="tabbar">
           <div id="tab-strip">
-            <button id="tab-more" type="button" title="隐藏的标签页" hidden>⋯</button>
+            <button id="tab-more" type="button" title="隐藏的标签页" aria-label="隐藏的标签页" hidden><svg class="ico dots" viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="8" r="1.1"/><circle cx="8" cy="8" r="1.1"/><circle cx="12.5" cy="8" r="1.1"/></svg></button>
             <div id="tab-list" role="tablist" aria-label="终端标签页"></div>
-            <button id="tab-add" type="button" title="新建标签页">＋</button>
+            <button id="tab-add" type="button" title="新建标签页" aria-label="新建标签页"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
           </div>
           <div id="tab-menu" hidden></div>
         </div>
@@ -36,9 +36,9 @@
         <div id="find-bar" hidden>
           <input id="find-input" type="text" placeholder="在当前终端中查找…" autocomplete="off" spellcheck="false" />
           <span id="find-count"></span>
-          <button id="find-prev" class="icon" type="button" title="上一个 (Shift+F3)">↑</button>
-          <button id="find-next" class="icon" type="button" title="下一个 (F3)">↓</button>
-          <button id="find-close" class="icon" type="button" title="关闭 (Esc)">✕</button>
+          <button id="find-prev" class="icon" type="button" title="上一个 (Shift+F3)" aria-label="上一个"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.5v-9"/><path d="M4.5 7 8 3.5 11.5 7"/></svg></button>
+          <button id="find-next" class="icon" type="button" title="下一个 (F3)" aria-label="下一个"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9"/><path d="M4.5 9 8 12.5 11.5 9"/></svg></button>
+          <button id="find-close" class="icon" type="button" title="关闭 (Esc)" aria-label="关闭查找"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8"/><path d="M12 4l-8 8"/></svg></button>
         </div>
 
         <div id="body">
@@ -46,18 +46,18 @@
             <div class="files-head">
               <div id="crumb"></div>
               <span class="spacer"></span>
-              <button id="files-refresh" class="icon" type="button" title="刷新">⟳</button>
-              <button id="files-cwd-sync" class="icon" type="button" title="目录跟随：开（点击关闭）" aria-pressed="true">⌖</button>
-              <button id="files-upload" class="icon" type="button" title="上传文件（也可直接拖入）">⇪</button>
-              <button id="files-new-file" class="icon" type="button" title="新建文件">＋</button>
-              <button id="files-new-dir" class="icon" type="button" title="新建目录">▣</button>
+              <button id="files-refresh" class="icon" type="button" title="刷新" aria-label="刷新"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.55-3.63"/><path d="M13 2.5V6h-3.5"/></svg></button>
+              <button id="files-cwd-sync" class="icon" type="button" title="目录跟随：开（点击关闭）" aria-label="目录跟随" aria-pressed="true"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v2.2M8 12.3v2.2M1.5 8h2.2M12.3 8h2.2"/></svg></button>
+              <button id="files-upload" class="icon" type="button" title="上传文件（也可直接拖入）" aria-label="上传文件"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 10.5v-8"/><path d="M4.5 6 8 2.5 11.5 6"/><path d="M3 10.5v3h10v-3"/></svg></button>
+              <button id="files-new-file" class="icon" type="button" title="新建文件" aria-label="新建文件"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 2h6l3 3v9h-9z"/><path d="M9.5 2v3h3"/><path d="M8 8v4M6 10h4"/></svg></button>
+              <button id="files-new-dir" class="icon" type="button" title="新建目录" aria-label="新建目录"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4.5h4.5l1.3 1.8h7.2v7.2h-13z"/><path d="M8 7.5v4M6 9.5h4"/></svg></button>
             </div>
             <ul id="file-list"></ul>
             <p id="notice"></p>
             <div id="upload-progress" hidden>
               <div class="bar"><span id="uprog-fill"></span></div>
               <span id="uprog-text"></span>
-              <button id="uprog-cancel" class="icon" type="button" title="取消上传">✕</button>
+              <button id="uprog-cancel" class="icon" type="button" title="取消上传" aria-label="取消上传"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8"/><path d="M12 4l-8 8"/></svg></button>
             </div>
             <input id="upload-input" type="file" multiple hidden />
           </aside>

@@ -118,26 +118,52 @@ button:focus-visible {
   text-overflow: ellipsis;
 }
 
-/* 文件 / 新建分屏 / 注销统一用图标，桌面侧栏和移动端顶栏都更紧凑。 */
-#bar #toggle-files,
-#bar #add-pane,
-#bar #logout {
-  font-size: 0;
+/* 图标一律用内联 SVG，避免字体符号自身的基线/边距导致视觉偏心。 */
+.ico {
+  display: block;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-#bar #toggle-files::before {
-  content: "▤";
-  font-size: 15px;
+#bar button .ico {
+  width: 16px;
+  height: 16px;
 }
 
-#bar #add-pane::before {
-  content: "⊞";
-  font-size: 15px;
+.ico.dots {
+  fill: currentColor;
+  stroke: none;
 }
 
-#bar #logout::before {
-  content: "⏻";
-  font-size: 15px;
+#tab-add .ico {
+  width: 13px;
+  height: 13px;
+}
+
+.tab-close,
+#tab-menu .menu-close,
+.pane-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tab-close .ico,
+#tab-menu .menu-close .ico,
+.pane-close .ico {
+  width: 11px;
+  height: 11px;
+}
+
+#find-bar .icon .ico {
+  width: 12px;
+  height: 12px;
 }
 
 /* PC 细指针：顶栏改成窄图标侧栏，省出垂直和水平空间。 */
@@ -588,6 +614,11 @@ button.icon {
   padding: 1px 5px;
   font-size: 11px;
   color: var(--dim);
+}
+
+#file-list .entry .actions .icon .ico {
+  width: 12px;
+  height: 12px;
 }
 
 #file-list .empty {
