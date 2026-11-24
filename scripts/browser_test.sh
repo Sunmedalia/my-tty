@@ -35,6 +35,8 @@ done
 export BASE="http://127.0.0.1:$PORT"
 export PASSWORD ROOT
 
+failures=0
+
 run_test() {
   local name="$1"
   local output
@@ -48,7 +50,9 @@ run_test() {
   local msg
   msg=$(printf '%s\n' "$output" | tr -d '\r' | awk 'NF { line = $0 } END { print line }' | sed 's/%/%25/g')
   echo "::error title=browser:$name::$msg"
-  return 1
+  # 不在第一个失败处退出：一次跑完，避免一个失败掩盖后面的失败。
+  failures=$((failures + 1))
+  return 0
 }
 
 run_test ui
@@ -58,5 +62,10 @@ run_test clipboard
 run_test session
 run_test files
 run_test cwd
+
+if [ "$failures" -ne 0 ]; then
+  echo "browser tests: $failures failed" >&2
+  exit 1
+fi
 
 echo "browser tests: ALL PASS"
