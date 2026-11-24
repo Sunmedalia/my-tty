@@ -182,7 +182,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
 
     var auth_state = auth.Auth.init(io, cfg.password orelse unreachable, cfg.session_ttl_days, cfg.session_idle_hours);
     var limiter: LoginLimiter = .{ .io = io };
-    var manager = session.Manager.init(io, gpa, cfg);
+    var manager = session.Manager.init(io, gpa, cfg, fs.root);
     defer manager.deinit();
 
     const addr = try net.IpAddress.parseIp4(cfg.host, cfg.port);

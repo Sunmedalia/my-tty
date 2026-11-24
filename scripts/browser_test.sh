@@ -41,5 +41,6 @@ node tests/browser/features.cjs
 node tests/browser/clipboard.cjs
 node tests/browser/session.cjs
 node tests/browser/files.cjs
+node tests/browser/cwd.cjs
 
 echo "browser tests: ALL PASS"

@@ -13,8 +13,11 @@
 //!         在回放前发送；客户端把 offset 设为 N，之后按二进制帧长度累加。
 //!   gap   {"t":"gap","lost":N}   缓冲区已丢弃 N 字节，从当前最旧的数据开始回放。
 //!   exit  {"t":"exit"}           shell 已退出。
+//!   cwd   {"t":"cwd","path":"<相对文件 root>"}  shell 的工作目录变化；只在
+//!         cwd 位于文件 root 内时发送，path 为相对 root 的 POSIX 路径。
 //!   error {"t":"error","reason":"..."}
-//! 客户端 → 服务端：二进制 = 输入；文本 {t:"resize",cols,rows} 或 {t:"close"}。
+//! 客户端 → 服务端：二进制 = 输入；文本 {t:"resize",cols,rows}、{t:"cwd"}
+//! （立即读一次并回报 cwd）或 {t:"close"}。
 
 const std = @import("std");
 const http = std.http;
@@ -58,9 +61,16 @@ pub const Manager = struct {
     sessions: std.ArrayList(*Session) = .empty,
     /// 当前还挂着的 WebSocket 前端数量；退出时用来判断是否可以安全释放会话。
     live_attachments: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    /// 文件 API 的规范化根目录，用于把 shell 的绝对 cwd 转成相对路径。
+    fs_root: []const u8 = "",
 
-    pub fn init(io: Io, gpa: Allocator, cfg: *const config.Config) Manager {
-        return .{ .io = io, .gpa = gpa, .cfg = cfg };
+    pub fn init(
+        io: Io,
+        gpa: Allocator,
+        cfg: *const config.Config,
+        fs_root: []const u8,
+    ) Manager {
+        return .{ .io = io, .gpa = gpa, .cfg = cfg, .fs_root = fs_root };
     }
 
     /// 只释放列表本身；会话应当在 shutdown() 里清理干净。
@@ -144,6 +154,10 @@ pub const Manager = struct {
         const count: usize = @intCast(total - from);
         if (count > 0) {
             try session.sendRing(att, @intCast(from - start_abs), count);
+        }
+
+        if (session.cwd_valid) {
+            sendCwd(self, att, session.cwd[0..session.cwd_len]) catch {};
         }
 
         session.attachment = att;
@@ -433,6 +447,10 @@ const Session = struct {
     closed: bool = false,
     closed_ns: i96 = 0,
     last_activity_ns: i96 = 0,
+    /// shell 最近一次被观测到的 cwd（绝对路径）。
+    cwd: [std.fs.max_path_bytes]u8 = undefined,
+    cwd_len: usize = 0,
+    cwd_valid: bool = false,
 
     fn now(self: *Session) i96 {
         return Io.Clock.real.now(self.manager.io).nanoseconds;
@@ -481,13 +499,78 @@ const Session = struct {
     }
 };
 
+fn readProcCwd(io: Io, child: posix.pid_t, buf: []u8) ?usize {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{child}) catch return null;
+    return std.Io.Dir.readLinkAbsolute(io, path, buf) catch null;
+}
+
+/// 文件 API 的 root 可能是 `/` 或某个绝对目录；只同步 root 内的 cwd。
+fn relativeCwd(root: []const u8, abs_raw: []const u8) ?[]const u8 {
+    var abs = abs_raw;
+    while (abs.len > 1 and abs[abs.len - 1] == '/') abs = abs[0 .. abs.len - 1];
+
+    if (std.mem.eql(u8, root, "/")) {
+        if (abs.len == 1 and abs[0] == '/') return "";
+        if (abs.len > 1 and abs[0] == '/') return abs[1..];
+        return null;
+    }
+    if (!std.mem.startsWith(u8, abs, root)) return null;
+    if (abs.len == root.len) return "";
+    if (abs[root.len] != '/') return null;
+    return abs[root.len + 1 ..];
+}
+
+fn sendCwd(manager: *Manager, att: *Attachment, abs_raw: []const u8) !void {
+    const rel = relativeCwd(manager.fs_root, abs_raw) orelse return;
+    var buf: [std.fs.max_path_bytes * 2 + 64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const Payload = struct {
+        t: []const u8 = "cwd",
+        path: []const u8,
+    };
+    std.json.Stringify.value(Payload{ .path = rel }, .{}, &w) catch return error.WriteFailed;
+    try att.sendText(w.buffered());
+}
+
+/// 读取 shell 的 /proc/<pid>/cwd，变了才发；force 用于客户端主动请求。
+fn refreshCwd(s: *Session, force: bool) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = readProcCwd(s.manager.io, s.child, &buf) orelse return;
+    const abs = buf[0..n];
+    if (!std.unicode.utf8ValidateSlice(abs)) return;
+
+    s.mutex.lockUncancelable(s.manager.io);
+    defer s.mutex.unlock(s.manager.io);
+
+    const changed = !s.cwd_valid or !std.mem.eql(u8, s.cwd[0..s.cwd_len], abs);
+    if (changed) {
+        if (abs.len > s.cwd.len) return;
+        @memcpy(s.cwd[0..abs.len], abs);
+        s.cwd_len = abs.len;
+        s.cwd_valid = true;
+    }
+    if (!changed and !force) return;
+
+    const att = s.attachment orelse return;
+    if (!att.alive) return;
+    sendCwd(s.manager, att, abs) catch {
+        att.alive = false;
+        att.stream.shutdown(s.manager.io, .both) catch {};
+    };
+}
+
 fn pump(s: *Session) void {
     var read_buf: [8192]u8 = undefined;
     var fds = [_]posix.pollfd{.{ .fd = s.master, .events = posix.POLL.IN, .revents = 0 }};
     while (!s.stopping.load(.acquire)) {
         fds[0].revents = 0;
         const ready = posix.poll(&fds, 500) catch break;
-        if (ready == 0) continue;
+        if (ready == 0) {
+            // shell 空闲时再查 cwd，避免持续输出时每个 8 KiB 块都读一次 /proc。
+            refreshCwd(s, false);
+            continue;
+        }
         if (fds[0].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) == 0) continue;
         const n = posix.read(s.master, &read_buf) catch break;
         if (n == 0) break;
@@ -577,6 +660,11 @@ pub fn serve(
                     manager.destroyAttached(&att);
                     return;
                 }
+                if (std.mem.eql(u8, control.t, "cwd")) {
+                    const s = att.session orelse return;
+                    refreshCwd(s, true);
+                    continue;
+                }
                 if (std.mem.eql(u8, control.t, "resize")) {
                     const s = att.session orelse return;
                     const cols = control.cols orelse continue;
@@ -604,10 +692,19 @@ pub fn parseOffset(value: ?[]const u8) u64 {
     return std.fmt.parseInt(u64, v, 10) catch 0;
 }
 
+test "cwd relative to file root" {
+    try std.testing.expectEqualStrings("srv/work", relativeCwd("/", "/srv/work").?);
+    try std.testing.expectEqualStrings("", relativeCwd("/", "/").?);
+    try std.testing.expectEqualStrings("", relativeCwd("/srv/work", "/srv/work").?);
+    try std.testing.expectEqualStrings("sub", relativeCwd("/srv/work", "/srv/work/sub").?);
+    try std.testing.expect(relativeCwd("/srv/work", "/srv/workshop") == null);
+    try std.testing.expect(relativeCwd("/srv/work", "/etc") == null);
+}
+
 test "ring buffer replay offsets" {
     const io = std.testing.io;
     var cfg = config.Config{};
-    var m = Manager.init(io, std.testing.allocator, &cfg);
+    var m = Manager.init(io, std.testing.allocator, &cfg, "/");
     // 不启动真实 PTY：手工构造一个 Session 测环形逻辑。
     var buf: [16]u8 = undefined;
     var s: Session = .{
@@ -630,7 +727,7 @@ test "ring buffer replay offsets" {
 test "ring buffer keeps the newest bytes for arbitrary appends" {
     const io = std.testing.io;
     var cfg = config.Config{};
-    var m = Manager.init(io, std.testing.allocator, &cfg);
+    var m = Manager.init(io, std.testing.allocator, &cfg, "/");
 
     var storage: [37]u8 = undefined;
     var s: Session = .{

@@ -294,6 +294,7 @@
     layoutTabs();
     updateSummary();
     saveSessions();
+    if (activePane && activePane.cwd) syncFilesToCwd(activePane.cwd);
     requestAnimationFrame(() => {
       for (const p of tab.panes) fitPane(p);
       if (activePane && !coarsePointer) activePane.term.focus();
@@ -497,6 +498,7 @@
       dot,
       sessionId: initialSession,
       offset: 0,
+      cwd: null,
       ws: null,
       alive: false,
       reconnect: null,
@@ -531,6 +533,7 @@
     activePane = pane;
     if (pane.tab) pane.tab.activePane = pane;
     for (const p of panes) p.el.classList.toggle("active", p === pane);
+    if (pane.cwd) syncFilesToCwd(pane.cwd);
     pane.term.focus();
   }
 
@@ -657,6 +660,11 @@
           if (replaced) setPaneStatus(pane, "已连接 · 原会话已失效", "pending");
         }
         sendResize(pane);
+      } else if (msg.t === "cwd") {
+        if (typeof msg.path === "string") {
+          pane.cwd = msg.path;
+          if (pane === activePane) syncFilesToCwd(msg.path);
+        }
       } else if (msg.t === "gap") {
         notice(`缓冲区已满，丢弃了 ${msg.lost} 字节历史输出`, true);
       } else if (msg.t === "exit") {
@@ -709,6 +717,14 @@
     statusEl.className = alive === total && total > 0 ? "ok" : total ? "pending" : "";
   }
 
+  function requestCwd(pane) {
+    const ws = pane.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify({ t: "cwd" }));
+    } catch (_) {}
+  }
+
   function sendInput(pane, data) {
     if (ctrlSticky && data.length === 1) {
       const code = data.toUpperCase().charCodeAt(0);
@@ -722,6 +738,11 @@
     const CHUNK = 8192;
     for (let i = 0; i < bytes.length; i += CHUNK) {
       ws.send(bytes.subarray(i, i + CHUNK));
+    }
+    // 用户执行完一条命令（回车）后主动对一次 cwd：pwd/cd 都能立刻同步文件树，
+    // 不需要等服务端 500ms 的轮询。
+    if (data.includes("\r") || data.includes("\n")) {
+      setTimeout(() => requestCwd(pane), 100);
     }
   }
 
@@ -1093,12 +1114,26 @@
     }
   }
 
-  function selectDir(path) {
+  function applyDir(path, force = false) {
     currentDir = path;
     expandPath(path);
+    // 面板关着时只记住位置，等打开时 refreshFiles() 一次性加载。
+    if (filesEl.hidden) return;
     renderCrumbs();
     renderTree();
-    for (const prefix of pathPrefixes(path)) ensureTreeLoaded(prefix);
+    for (const prefix of pathPrefixes(path)) ensureTreeLoaded(prefix, force);
+  }
+
+  function selectDir(path) {
+    if (path === currentDir && treeExpanded.has(path)) return;
+    applyDir(path);
+  }
+
+  /// shell 的 cwd 变化或用户按回车后，把文件树跳到对应目录。
+  /// 强制重读路径上的目录，终端里新建的目录也能立即出现在树里。
+  function syncFilesToCwd(path) {
+    if (typeof path !== "string" || path === currentDir) return;
+    applyDir(path, true);
   }
 
   function toggleDir(path) {
