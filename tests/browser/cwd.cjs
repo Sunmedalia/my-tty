@@ -1,4 +1,4 @@
-// 终端 cwd 同步：cd 后文件树跟随；手动回到根目录后执行 pwd 会重新同步。
+// 终端 cwd 同步：cd 后文件树跟随并滚动到可见位置；手动回到根目录后执行 pwd 会重新同步。
 const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
@@ -12,6 +12,12 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
 (async () => {
   const sub = path.join(ROOT, "cwd-sub");
   fs.mkdirSync(sub, { recursive: true });
+  // 足够多的同级目录，让后面的目标必须滚动才能看到。
+  const target = path.join(ROOT, "zzz-cwd-target");
+  fs.mkdirSync(target, { recursive: true });
+  for (let i = 0; i < 50; i += 1) {
+    fs.mkdirSync(path.join(ROOT, `pad-${String(i).padStart(2, "0")}`), { recursive: true });
+  }
 
   const browser = await chromium.launch({ executablePath: CHROME, args: ["--no-sandbox"] });
   const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
@@ -62,6 +68,23 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.keyboard.type("pwd\r");
   await waitCrumb("cwd-sub");
   assert((await activeCrumb()) === "cwd-sub", "pwd resyncs the tree");
+
+  // cd 到树中靠后的目录：除了选中，还要自动滚动到可见位置。
+  await page.locator(".pane-term").click();
+  await page.keyboard.type(`cd '${target}'\r`);
+  await waitCrumb("zzz-cwd-target");
+  await page.waitForFunction(
+    () => {
+      const list = document.querySelector("#file-list");
+      const sel = list.querySelector(".entry.selected");
+      if (!sel) return false;
+      const l = list.getBoundingClientRect();
+      const r = sel.getBoundingClientRect();
+      return list.scrollTop > 0 && r.top >= l.top - 1 && r.bottom <= l.bottom + 1;
+    },
+    null,
+    { timeout: 10000 }
+  );
 
   assert(errors.length === 0, "console errors: " + errors.join(" | "));
   console.log("cwd: PASS");

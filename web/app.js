@@ -1121,7 +1121,11 @@
     if (filesEl.hidden) return;
     renderCrumbs();
     renderTree();
-    for (const prefix of pathPrefixes(path)) ensureTreeLoaded(prefix, force);
+    scrollTreeToSelected();
+    const pending = pathPrefixes(path).map((prefix) => ensureTreeLoaded(prefix, force));
+    Promise.all(pending).then(() => {
+      if (currentDir === path && !filesEl.hidden) scrollTreeToSelected();
+    });
   }
 
   function selectDir(path) {
@@ -1235,6 +1239,18 @@
       fileList.appendChild(renderNode("", entry));
     }
     fileList.scrollTop = scrollTop;
+  }
+
+  function scrollTreeToSelected() {
+    const sel = fileList.querySelector(".entry.selected");
+    if (!sel) return;
+    const list = fileList.getBoundingClientRect();
+    const row = sel.getBoundingClientRect();
+    if (row.top < list.top) {
+      fileList.scrollTop -= list.top - row.top;
+    } else if (row.bottom > list.bottom) {
+      fileList.scrollTop += row.bottom - list.bottom;
+    }
   }
 
   function renderNode(parentPath, entry) {
@@ -1737,7 +1753,11 @@
     filesEl.hidden = !filesEl.hidden;
     filesResizeEl.hidden = filesEl.hidden;
     if (!filesEl.hidden) {
-      refreshFiles();
+      refreshFiles()
+        .then(() => {
+          if (!filesEl.hidden) scrollTreeToSelected();
+        })
+        .catch(() => {});
       requestAnimationFrame(() => panes.forEach(fitPane));
     }
   });
