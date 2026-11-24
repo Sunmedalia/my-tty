@@ -58,6 +58,9 @@ pub fn spawn(gpa: std.mem.Allocator, opts: SpawnOptions) SpawnError!Pty {
         .ACCMODE = .RDWR,
         .NOCTTY = true,
         .CLOEXEC = true,
+        // 读走 pump 的 poll，写走 writeAll 的 poll；非阻塞主端避免客户端输入
+        // 把连接线程永久卡在 write(2) 上。
+        .NONBLOCK = true,
     }, 0) catch return error.OpenPtyFailed;
     errdefer _ = linux.close(master);
 
@@ -155,8 +158,10 @@ pub fn resize(master: posix.fd_t, cols: u16, rows: u16) void {
     _ = linux.ioctl(master, linux.T.IOCSWINSZ, @intFromPtr(&ws));
 }
 
-/// 向 PTY 写入全部数据；被信号打断时重试。
+/// 向 PTY 写入全部数据；主端是非阻塞的，队列满时最多等 10 秒。
+/// 一个不读 stdin 的前台程序不能把连接线程/会话永久钉住。
 pub fn writeAll(master: posix.fd_t, data: []const u8) !void {
+    var fds = [_]posix.pollfd{.{ .fd = master, .events = posix.POLL.OUT, .revents = 0 }};
     var i: usize = 0;
     while (i < data.len) {
         const rc = linux.write(master, data[i..].ptr, data.len - i);
@@ -166,6 +171,13 @@ pub fn writeAll(master: posix.fd_t, data: []const u8) !void {
                 i += rc;
             },
             .INTR => continue,
+            .AGAIN => {
+                fds[0].revents = 0;
+                const ready = posix.poll(&fds, 10_000) catch return error.WriteFailed;
+                if (ready == 0) return error.WriteTimeout;
+                if (fds[0].revents & (posix.POLL.OUT | posix.POLL.ERR | posix.POLL.HUP) == 0)
+                    return error.WriteFailed;
+            },
             else => return error.WriteFailed,
         }
     }

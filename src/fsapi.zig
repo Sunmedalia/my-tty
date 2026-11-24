@@ -1,8 +1,9 @@
 //! 受限文件系统 API：列目录、读、写、建目录、重命名、删除。
 //!
-//! 边界：所有路径参数都是相对 `root` 的 POSIX 路径。已存在的目标先
-//! `realPathFileAlloc` 再校验前缀；新建目标先校验父目录。符号链接因此
-//! 无法把访问范围带出 root。
+//! 边界：所有路径参数都是相对 `root` 的 POSIX 路径。list/read/download/archive
+//! 先 `realPathFileAlloc` 再校验前缀；delete/rename 只解析父目录，操作符号链接
+//! 本身；新建目标先校验父目录。常规路径解析下符号链接无法把访问范围带出 root；
+//! 同一 uid 的并发替换（TOCTOU）不在 `--root` 的防护范围内。
 //!
 //! 只处理文本：读取上限 1 MiB，含 NUL 视为二进制拒绝。
 
@@ -126,6 +127,12 @@ fn list(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) 
             truncated = true;
             break;
         }
+        // 前端用 JSON 字符串展示/操作文件名；非 UTF-8 名字会被 JSON 编码成
+        // 数字数组，可能被字符串化成另一个路径。直接跳过，避免误操作别的文件。
+        if (!std.unicode.utf8ValidateSlice(entry.name)) {
+            truncated = true;
+            continue;
+        }
         const name = arena.dupe(u8, entry.name) catch return fail(request, arena, .internal_server_error, "out_of_memory");
         const size: u64 = if (entry.kind == .file) blk: {
             const st = dir.statFile(io, entry.name, .{ .follow_symlinks = false }) catch break :blk 0;
@@ -159,9 +166,13 @@ fn read(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) 
     if (st.kind != .file) return fail(request, arena, .bad_request, "not_a_file");
     if (st.size > max_read) return fail(request, arena, .payload_too_large, "file_too_large");
 
-    const bytes = Dir.cwd().readFileAlloc(io, abs, arena, .limited(max_read)) catch |err|
-        return failMapped(request, arena, err);
-    if (std.mem.indexOfScalar(u8, bytes, 0) != null)
+    // .limited(N) 在恰好 N 字节时也会报 StreamTooLong，所以留 1 字节余量；
+    // 超过 max_read 的真实文件仍然拒绝。
+    const bytes = Dir.cwd().readFileAlloc(io, abs, arena, .limited(max_read + 1)) catch |err| switch (err) {
+        error.StreamTooLong => return fail(request, arena, .payload_too_large, "file_too_large"),
+        else => return failMapped(request, arena, err),
+    };
+    if (std.mem.indexOfScalar(u8, bytes, 0) != null or !std.unicode.utf8ValidateSlice(bytes))
         return fail(request, arena, .unsupported_media_type, "binary_file");
 
     const Payload = struct { path: []const u8, content: []const u8, size: u64 };
@@ -174,21 +185,26 @@ fn write(io: Io, gpa: Allocator, arena: Allocator, fs: *const Fs, request: *http
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
 
     if (request.head.content_length) |len| {
-        if (len > max_write) return fail(request, arena, .payload_too_large, "body_too_large");
+        if (len > max_write) return failClose(request, arena, .payload_too_large, "body_too_large");
     }
 
     var body_buf: [4096]u8 = undefined;
     const body_reader = request.readerExpectContinue(&body_buf) catch return fail(request, arena, .bad_request, "bad_body");
     const body = body_reader.allocRemaining(gpa, .limited(max_write)) catch |err| switch (err) {
-        error.StreamTooLong => return fail(request, arena, .payload_too_large, "body_too_large"),
-        else => return fail(request, arena, .bad_request, "bad_body"),
+        error.StreamTooLong => return failClose(request, arena, .payload_too_large, "body_too_large"),
+        else => return failClose(request, arena, .bad_request, "bad_body"),
     };
     defer gpa.free(body);
+    // 客户端可能在 Content-Length 之前就断开；不能把半截内容写进目标文件。
+    if (!bodyComplete(request)) return failClose(request, arena, .bad_request, "bad_body");
 
     const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
 
-    var atomic = Dir.cwd().createFileAtomic(io, abs, .{ .replace = true }) catch |err|
-        return failMapped(request, arena, err);
+    const perms = existingFilePermissions(io, abs) orelse .default_file;
+    var atomic = Dir.cwd().createFileAtomic(io, abs, .{
+        .replace = true,
+        .permissions = perms,
+    }) catch |err| return failMapped(request, arena, err);
     defer atomic.deinit(io);
     atomic.file.writeStreamingAll(io, body) catch |err| return failMapped(request, arena, err);
     atomic.replace(io) catch |err| return failMapped(request, arena, err);
@@ -215,7 +231,7 @@ fn rename(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
         return fail(request, arena, .bad_request, "invalid_path");
     if (from_rel.len == 0 or to_rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
 
-    const from_abs = resolveExisting(io, arena, fs, from_rel) catch |err| return failMapped(request, arena, err);
+    const from_abs = resolveLeaf(io, arena, fs, from_rel) catch |err| return failMapped(request, arena, err);
     const to_abs = resolveNew(io, arena, fs, to_rel) catch |err| return failMapped(request, arena, err);
     if (std.mem.eql(u8, from_abs, fs.root)) return fail(request, arena, .forbidden, "cannot_move_root");
 
@@ -228,7 +244,7 @@ fn delete(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
-    const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = resolveLeaf(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
     if (std.mem.eql(u8, abs, fs.root)) return fail(request, arena, .forbidden, "cannot_delete_root");
 
     const st = Dir.cwd().statFile(io, abs, .{ .follow_symlinks = false }) catch |err|
@@ -258,13 +274,16 @@ fn upload(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
 
 fn uploadSingle(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, request: *http.Server.Request) !void {
     if (request.head.content_length) |len| {
-        if (len > max_upload) return fail(request, arena, .payload_too_large, "upload_too_large");
+        if (len > max_upload) return failClose(request, arena, .payload_too_large, "upload_too_large");
     }
 
     const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
 
-    var atomic = Dir.cwd().createFileAtomic(io, abs, .{ .replace = true }) catch |err|
-        return failMapped(request, arena, err);
+    const perms = existingFilePermissions(io, abs) orelse .default_file;
+    var atomic = Dir.cwd().createFileAtomic(io, abs, .{
+        .replace = true,
+        .permissions = perms,
+    }) catch |err| return failMapped(request, arena, err);
     defer atomic.deinit(io);
 
     var head_buf: [16 * 1024]u8 = undefined;
@@ -276,9 +295,12 @@ fn uploadSingle(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, reques
         const n = body_reader.readSliceShort(&chunk) catch |err| return failMapped(request, arena, err);
         if (n == 0) break;
         total += n;
-        if (total > max_upload) return fail(request, arena, .payload_too_large, "upload_too_large");
+        if (total > max_upload) return failClose(request, arena, .payload_too_large, "upload_too_large");
         atomic.file.writeStreamingAll(io, chunk[0..n]) catch |err| return failMapped(request, arena, err);
     }
+
+    // 同上：body 不完整时保留临时文件交给清理线程，不要覆盖目标文件。
+    if (!bodyComplete(request)) return failClose(request, arena, .bad_request, "bad_body");
 
     atomic.replace(io) catch |err| return failMapped(request, arena, err);
 
@@ -291,8 +313,8 @@ fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []c
         return fail(request, arena, .bad_request, "invalid_offset");
     const total = parseU64(param(arena, request, "total")) orelse
         return fail(request, arena, .bad_request, "invalid_total");
-    if (total == 0 or total > max_upload) return fail(request, arena, .payload_too_large, "upload_too_large");
-    if (offset > total) return fail(request, arena, .bad_request, "invalid_offset");
+    if (total == 0 or total > max_upload) return failClose(request, arena, .payload_too_large, "upload_too_large");
+    if (offset > total) return failClose(request, arena, .bad_request, "invalid_offset");
 
     const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
     const temp = uploadTempPath(arena, abs, id) catch
@@ -351,7 +373,8 @@ fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []c
     // 完整写入后改回普通文件权限再 rename；未完成的半截文件保持 0600。
     // 用 fd 上的 chmod，不经过路径，因此不受符号链接替换影响。
     if (written == total) {
-        file.setPermissions(io, .fromMode(upload_final_mode)) catch {};
+        const perms = existingFilePermissions(io, abs) orelse std.Io.File.Permissions.fromMode(upload_final_mode);
+        file.setPermissions(io, perms) catch {};
     }
 
     file.close(io);
@@ -370,6 +393,7 @@ fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []c
 fn uploadStatus(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
+    if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
     const raw_id = param(arena, request, "id");
     if (raw_id.len == 0) return fail(request, arena, .bad_request, "invalid_id");
     const id = validUploadId(raw_id) orelse return fail(request, arena, .bad_request, "invalid_id");
@@ -388,6 +412,7 @@ fn uploadStatus(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.R
 fn uploadCancel(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
+    if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
     const raw_id = param(arena, request, "id");
     if (raw_id.len == 0) return fail(request, arena, .bad_request, "invalid_id");
     const id = validUploadId(raw_id) orelse return fail(request, arena, .bad_request, "invalid_id");
@@ -503,7 +528,10 @@ fn archive(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Reques
 
     var stream_buf: [64 * 1024]u8 = undefined;
     var body = try request.respondStreaming(&stream_buf, .{
-        .respond_options = .{ .extra_headers = &headers },
+        .respond_options = .{
+            .extra_headers = &headers,
+            .keep_alive = keepAliveForRequest(request),
+        },
     });
 
     var tw: std.tar.Writer = .{ .underlying_writer = &body.writer };
@@ -517,7 +545,7 @@ fn archive(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Reques
             "归档内容超过服务端上限，已截断。请改为下载子目录，或单独下载文件。\n" ++
                 "本文件由 my-tty 自动生成。\n",
             .{},
-        ) catch {};
+        ) catch return error.WriteFailed;
     }
     tw.finishPedantically() catch return error.WriteFailed;
     return body.end();
@@ -563,16 +591,17 @@ fn walkTar(
         switch (entry.kind) {
             .directory => {
                 state.entries += 1;
-                tw.writeDir(sub, .{}) catch continue;
+                tw.writeDir(sub, .{}) catch return error.WriteFailed;
                 const child_abs = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_abs, entry.name });
-                walkTar(io, alloc, tw, state, child_abs, sub, depth + 1) catch {};
+                try walkTar(io, alloc, tw, state, child_abs, sub, depth + 1);
             },
             .file => {
                 var file = dir.openFile(io, entry.name, .{ .follow_symlinks = false }) catch continue;
                 defer file.close(io);
                 const st = file.stat(io) catch continue;
                 // 流式 tar 的头部要预先写长度，不能一边超限一边回头改。
-                if (st.size > max_tar_bytes - state.bytes) {
+                // tar 的八进制 size 字段最大只能表示 max_tar_bytes - 1。
+                if (st.size > max_tar_bytes - 1 - state.bytes) {
                     state.truncated = true;
                     return;
                 }
@@ -580,7 +609,10 @@ fn walkTar(
                 state.bytes += st.size;
                 var buf: [64 * 1024]u8 = undefined;
                 var fr = file.reader(io, &buf);
-                tw.writeFileStream(sub, st.size, &fr.interface, .{}) catch continue;
+                // 这里一旦开始写 tar 头，读失败就不能再 continue：否则后续
+                // 内容会错位，finish/end 甚至可能触发 unreachable。直接让
+                // 连接关闭，客户端看到的是截断的 HTTP 响应而不是损坏的 tar。
+                tw.writeFileStream(sub, st.size, &fr.interface, .{}) catch return error.WriteFailed;
             },
             else => {},
         }
@@ -615,7 +647,10 @@ fn download(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Reque
     var stream_buf: [64 * 1024]u8 = undefined;
     var body = try request.respondStreaming(&stream_buf, .{
         .content_length = st.size,
-        .respond_options = .{ .extra_headers = &headers },
+        .respond_options = .{
+            .extra_headers = &headers,
+            .keep_alive = keepAliveForRequest(request),
+        },
     });
 
     var file_buf: [64 * 1024]u8 = undefined;
@@ -691,6 +726,13 @@ fn joinAbs(alloc: Allocator, root: []const u8, rel: []const u8) ![]const u8 {
     return std.fmt.allocPrint(alloc, "{s}/{s}", .{ root, rel });
 }
 
+/// 保留被覆盖文件的权限位；目标不存在/是符号链接时返回 null，交给默认 umask/模式。
+fn existingFilePermissions(io: Io, abs: []const u8) ?std.Io.File.Permissions {
+    const st = Dir.cwd().statFile(io, abs, .{ .follow_symlinks = false }) catch return null;
+    if (st.kind == .file) return st.permissions;
+    return null;
+}
+
 fn resolveExisting(io: Io, alloc: Allocator, fs: *const Fs, rel: []const u8) PathError![:0]u8 {
     const joined = joinAbs(alloc, fs.root, rel) catch return error.OutOfMemory;
     const abs = Dir.cwd().realPathFileAlloc(io, joined, alloc) catch |err| return switch (err) {
@@ -705,6 +747,22 @@ fn resolveExisting(io: Io, alloc: Allocator, fs: *const Fs, rel: []const u8) Pat
 
 /// 目标可以不存在，但父目录必须存在且在 root 内。
 fn resolveNew(io: Io, alloc: Allocator, fs: *const Fs, rel: []const u8) PathError![]const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, rel, '/') orelse {
+        const parent = try resolveExisting(io, alloc, fs, "");
+        return joinAbs(alloc, parent, rel);
+    };
+    const parent_rel = rel[0..slash];
+    const base = rel[slash + 1 ..];
+    if (base.len == 0 or std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, ".."))
+        return error.InvalidPath;
+    const parent = try resolveExisting(io, alloc, fs, parent_rel);
+    return joinAbs(alloc, parent, base);
+}
+
+/// 只规范化父目录，不解析最后一段。delete/rename 用它来操作符号链接本身，
+/// 而不是把链接解析到目标，避免“删除一个链接却删掉整个目标目录”。
+fn resolveLeaf(io: Io, alloc: Allocator, fs: *const Fs, rel: []const u8) PathError![]const u8 {
+    if (rel.len == 0) return error.InvalidPath;
     const slash = std.mem.lastIndexOfScalar(u8, rel, '/') orelse {
         const parent = try resolveExisting(io, alloc, fs, "");
         return joinAbs(alloc, parent, rel);
@@ -735,6 +793,7 @@ fn resolveCreatePath(io: Io, alloc: Allocator, fs: *const Fs, rel: []const u8) P
         };
         if (!inside(fs.root, abs)) return error.OutsideRoot;
         if (prefix.len == 0) return joinAbs(alloc, abs, rel);
+        if (prefix.len == rel.len) return alloc.dupe(u8, abs);
         return std.fmt.allocPrint(alloc, "{s}/{s}", .{ abs, rel[prefix.len + 1 ..] }) catch
             return error.OutOfMemory;
     }
@@ -754,7 +813,37 @@ fn entryLessThan(_: void, a: Entry, b: Entry) bool {
     return std.mem.lessThan(u8, a.name, b.name);
 }
 
+fn requestHasBody(request: *const http.Server.Request) bool {
+    if (request.head.transfer_encoding != .none) return true;
+    if (request.head.content_length) |len| return len != 0;
+    return false;
+}
+
+/// body 没读干净就关连接，避免 std.http 为了 keep-alive 去 drain 一个
+/// 可能已经被客户端截断的 body（那会触发断言并中止整个进程）。
+fn keepAliveForRequest(request: *const http.Server.Request) bool {
+    if (!requestHasBody(request)) return true;
+    return bodyComplete(request);
+}
+
+fn bodyComplete(request: *const http.Server.Request) bool {
+    return switch (request.server.reader.state) {
+        .ready => true,
+        else => false,
+    };
+}
+
 fn respondJson(request: *http.Server.Request, alloc: Allocator, status: http.Status, value: anytype) anyerror!void {
+    return respondJsonKeepAlive(request, alloc, status, value, keepAliveForRequest(request));
+}
+
+fn respondJsonKeepAlive(
+    request: *http.Server.Request,
+    alloc: Allocator,
+    status: http.Status,
+    value: anytype,
+    keep_alive: bool,
+) anyerror!void {
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     std.json.Stringify.value(value, .{}, &out.writer) catch
@@ -763,8 +852,13 @@ fn respondJson(request: *http.Server.Request, alloc: Allocator, status: http.Sta
     var headers = [_]http.Header{
         .{ .name = "content-type", .value = "application/json; charset=utf-8" },
         .{ .name = "cache-control", .value = "no-store" },
+        .{ .name = "x-content-type-options", .value = "nosniff" },
     };
-    return request.respond(out.written(), .{ .status = status, .extra_headers = &headers });
+    return request.respond(out.written(), .{
+        .status = status,
+        .extra_headers = &headers,
+        .keep_alive = keep_alive,
+    });
 }
 
 /// 不经过 JSON 编码 / 分配器的固定响应，避免 OOM 时递归调用自身。
@@ -772,13 +866,24 @@ fn respondStatic(request: *http.Server.Request, status: http.Status, body: []con
     var headers = [_]http.Header{
         .{ .name = "content-type", .value = "application/json; charset=utf-8" },
         .{ .name = "cache-control", .value = "no-store" },
+        .{ .name = "x-content-type-options", .value = "nosniff" },
     };
-    return request.respond(body, .{ .status = status, .extra_headers = &headers });
+    return request.respond(body, .{
+        .status = status,
+        .extra_headers = &headers,
+        .keep_alive = keepAliveForRequest(request),
+    });
 }
 
 fn fail(request: *http.Server.Request, alloc: Allocator, status: http.Status, code: []const u8) anyerror!void {
     const Payload = struct { @"error": []const u8 };
     return respondJson(request, alloc, status, Payload{ .@"error" = code });
+}
+
+/// body 没有读完的错误必须关连接，避免残余字节被当成下一个请求。
+fn failClose(request: *http.Server.Request, alloc: Allocator, status: http.Status, code: []const u8) anyerror!void {
+    const Payload = struct { @"error": []const u8 };
+    return respondJsonKeepAlive(request, alloc, status, Payload{ .@"error" = code }, false);
 }
 
 fn failMapped(request: *http.Server.Request, alloc: Allocator, err: anyerror) anyerror!void {
@@ -787,6 +892,8 @@ fn failMapped(request: *http.Server.Request, alloc: Allocator, err: anyerror) an
         error.OutsideRoot => fail(request, alloc, .forbidden, "outside_root"),
         error.FileNotFound => fail(request, alloc, .not_found, "not_found"),
         error.PathAlreadyExists => fail(request, alloc, .conflict, "already_exists"),
+        error.NotDir => fail(request, alloc, .conflict, "not_a_directory"),
+        error.IsDir => fail(request, alloc, .conflict, "is_a_directory"),
         error.AccessDenied => fail(request, alloc, .forbidden, "access_denied"),
         error.OutOfMemory => fail(request, alloc, .internal_server_error, "out_of_memory"),
         else => fail(request, alloc, .internal_server_error, "io_error"),
@@ -852,4 +959,19 @@ test "inside boundary" {
     try std.testing.expect(!inside("/srv/root", "/srv/root2/a"));
     try std.testing.expect(!inside("/srv/root", "/srv"));
     try std.testing.expect(inside("/", "/anything"));
+}
+
+test "resolveCreatePath handles an already existing target" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+
+    // `/proc` 在 Linux 上一定存在；以前这里会对 prefix.len + 1 越界 panic。
+    var fs: Fs = .{ .root = "/" };
+    try std.testing.expectEqualStrings("/proc", try resolveCreatePath(io, a, &fs, "proc"));
+    try std.testing.expectEqualStrings(
+        "/proc/sys",
+        try resolveCreatePath(io, a, &fs, "proc/sys"),
+    );
 }

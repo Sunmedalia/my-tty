@@ -676,7 +676,11 @@
         setPaneStatus(pane, "Shell 已退出（点击重连）", "error");
       } else if (msg.t === "error") {
         setPaneStatus(
-          msg.reason === "too_many_sessions" ? "会话数已满（点击重试）" : "会话异常（点击重连）",
+          msg.reason === "too_many_sessions"
+            ? "会话数已满（点击重试）"
+            : msg.reason === "session_busy"
+              ? "会话正忙（点击重试）"
+              : "会话异常（点击重连）",
           "error"
         );
       }

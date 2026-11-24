@@ -68,6 +68,16 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'content-type: application/jso
 [ "$code" = "401" ]
 pass "wrong password rejected"
 
+echo "== csrf origin =="
+code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" \
+  -H 'Origin: https://evil.example' -X POST "$API/mkdir?path=csrf-test")
+[ "$code" = "403" ]
+pass "cross-origin mutation rejected"
+
+curl -fsS -b "$COOKIE_JAR" -H "Origin: $BASE" -X POST "$API/mkdir?path=origin-ok" | grep -c '"ok":true' >/dev/null
+curl -fsS -b "$COOKIE_JAR" -X DELETE "$API/delete?path=origin-ok" >/dev/null
+pass "same-origin mutation allowed"
+
 echo "== fs api =="
 curl -fsS -b "$COOKIE_JAR" "$API/list?path=" | grep -c '"entries"' >/dev/null
 pass list
@@ -78,8 +88,47 @@ pass write
 curl -fsS -b "$COOKIE_JAR" "$API/read?path=note.txt" | grep -c 'smoke content' >/dev/null
 pass read
 
+echo "== fs hardening =="
+code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$API/upload?path=&id=deadbeef")
+[ "$code" = "400" ]
+pass "empty upload status path rejected"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" -X DELETE "$API/upload?path=&id=deadbeef")
+[ "$code" = "400" ]
+pass "empty upload cancel path rejected"
+
+printf 'mode' > "$ROOT/mode.txt"
+chmod 600 "$ROOT/mode.txt"
+curl -fsS -X PUT -b "$COOKIE_JAR" --data-binary 'mode2' "$API/write?path=mode.txt" >/dev/null
+[ "$(stat -c%a "$ROOT/mode.txt")" = "600" ]
+pass "write preserves permissions"
+
+mkdir "$ROOT/victimdir"
+ln -s victimdir "$ROOT/dirlink"
+curl -fsS -X DELETE -b "$COOKIE_JAR" "$API/delete?path=dirlink" >/dev/null
+[ ! -L "$ROOT/dirlink" ] && [ -d "$ROOT/victimdir" ]
+pass "delete removes link, not target"
+
+printf 'target' > "$ROOT/target.txt"
+ln -s target.txt "$ROOT/link.txt"
+curl -fsS -X POST -b "$COOKIE_JAR" "$API/rename?from=link.txt&to=link2.txt" >/dev/null
+[ -L "$ROOT/link2.txt" ] && [ ! -e "$ROOT/link.txt" ] && [ "$(cat "$ROOT/target.txt")" = "target" ]
+pass "rename moves link, not target"
+
+yes a | head -c 1048576 > "$ROOT/exact.bin" || true
+curl -fsS -b "$COOKIE_JAR" "$API/read?path=exact.bin" | grep -c '"size":1048576' >/dev/null
+pass "1 MiB read"
+
+printf '\xff\xfeA' > "$ROOT/latin1.txt"
+code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$API/read?path=latin1.txt")
+[ "$code" = "415" ]
+pass "non-UTF8 read rejected"
+
 curl -fsS -X POST -b "$COOKIE_JAR" "$API/mkdir?path=a/b" | grep -c '"ok":true' >/dev/null
 pass mkdir
+
+# 对已存在的目录再次 mkdir 必须正常返回，不能因为路径切片越界把进程打崩。
+curl -fsS -X POST -b "$COOKIE_JAR" "$API/mkdir?path=a/b" | grep -c '"ok":true' >/dev/null
+pass "mkdir existing target"
 
 curl -fsS -X POST -b "$COOKIE_JAR" "$API/rename?from=note.txt&to=a/note.txt" | grep -c '"ok":true' >/dev/null
 pass rename
@@ -104,6 +153,8 @@ pass "cleanup upload"
 
 echo "== chunked upload =="
 dd if=/dev/zero of="$CHUNK_SRC" bs=1024 count=3000 2>/dev/null
+printf 'old' > "$ROOT/chunk.bin"
+chmod 600 "$ROOT/chunk.bin"
 rm -f /tmp/mytty-chunk.*
 split -b 2000000 "$CHUNK_SRC" /tmp/mytty-chunk.
 off=0
@@ -115,7 +166,8 @@ for part in /tmp/mytty-chunk.*; do
   off=$((off + size))
 done
 cmp -s "$CHUNK_SRC" "$ROOT/chunk.bin"
-pass "chunked upload"
+[ "$(stat -c%a "$ROOT/chunk.bin")" = "600" ]
+pass "chunked upload preserves permissions"
 curl -fsS -X DELETE -b "$COOKIE_JAR" "$API/delete?path=chunk.bin" >/dev/null
 
 echo "== archive =="
@@ -142,6 +194,10 @@ pass "websocket + pty"
 echo "== session resume =="
 node scripts/session_test.mjs "$BASE" "$PASSWORD"
 pass "session resume"
+
+echo "== http body boundaries =="
+node scripts/http_guard_test.mjs "$BASE" "$PASSWORD"
+pass "http body boundaries"
 
 echo "== logout =="
 curl -fsS -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE/api/auth/logout" >/dev/null

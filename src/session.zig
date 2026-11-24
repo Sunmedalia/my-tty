@@ -40,7 +40,8 @@ pub const Attachment = struct {
     stream: *const net.Stream,
     session: ?*Session = null,
     send_mutex: Io.Mutex = .init,
-    alive: bool = true,
+    /// pump/attach 与连接线程会并发读写，必须是原子量。
+    alive: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 
     fn sendRaw(self: *Attachment, data: []const u8, op: http.Server.WebSocket.Opcode) !void {
         self.send_mutex.lockUncancelable(self.io);
@@ -82,6 +83,17 @@ pub const Manager = struct {
         return Io.Clock.real.now(self.io).nanoseconds;
     }
 
+    /// attach 时不能无限等 session 锁：慢客户端可能让 pump 长时间卡在写 socket 上。
+    fn lockSessionBounded(self: *Manager, s: *Session, timeout_ms: u32) bool {
+        var waited: u32 = 0;
+        while (!s.mutex.tryLock()) {
+            if (waited >= timeout_ms) return false;
+            Io.sleep(self.io, Io.Duration.fromMilliseconds(2), .real) catch return false;
+            waited += 2;
+        }
+        return true;
+    }
+
     /// 找到已有会话就 attach；否则创建新会话。整个过程持有 manager 锁，
     /// 保证 sweep 不会在 attach 期间释放会话。
     pub fn attach(
@@ -96,24 +108,25 @@ pub const Manager = struct {
         const session = blk: {
             if (session_id) |sid| {
                 if (self.findLocked(sid)) |found| {
-                    if (!found.closed) break :blk found;
-                    // shell 已经退出：旧会话没有恢复价值。但如果旧前端还没 detach，
-                    // 不能现在 free，交给 sweep 在连接退出后回收。
-                    found.mutex.lockUncancelable(self.io);
-                    const busy = found.attachment != null;
+                    if (!self.lockSessionBounded(found, 250)) return error.SessionBusy;
+                    // closed/closing 的会话不能再接；但旧前端可能还持有指针。
+                    const reusable = !found.closed and !found.closing;
+                    const busy = found.attachment != null or found.attachments > 0;
                     found.mutex.unlock(self.io);
+                    if (reusable) break :blk found;
                     if (!busy) self.destroyLocked(found);
                 }
             }
             break :blk try self.createLocked();
         };
 
-        session.mutex.lockUncancelable(self.io);
+        if (!self.lockSessionBounded(session, 250)) return error.SessionBusy;
         defer session.mutex.unlock(self.io);
 
-        // 同一个会话被另一个前端接管时，先踢掉旧的。
+        // 同一个会话被另一个前端接管时，先踢掉旧的。旧 Attachment 仍算一个
+        // ref，必须等它自己 detach 后才能释放 Session。
         if (session.attachment) |old| {
-            old.alive = false;
+            old.alive.store(false, .release);
             old.stream.shutdown(self.io, .both) catch {};
             session.attachment = null;
         }
@@ -129,10 +142,12 @@ pub const Manager = struct {
         }
 
         att.session = session;
+        session.attachments += 1;
         session.last_activity_ns = self.now();
         _ = self.live_attachments.fetchAdd(1, .acq_rel);
         errdefer {
             att.session = null;
+            if (session.attachments > 0) session.attachments -= 1;
             _ = self.live_attachments.fetchSub(1, .acq_rel);
         }
 
@@ -170,34 +185,54 @@ pub const Manager = struct {
         session.mutex.lockUncancelable(self.io);
         if (session.attachment == att) session.attachment = null;
         session.last_activity_ns = self.now();
+        if (session.attachments > 0) session.attachments -= 1;
         session.mutex.unlock(self.io);
 
         _ = self.live_attachments.fetchSub(1, .acq_rel);
-        // 不在连接线程里销毁会话：sweep 每秒跑一次，由它统一回收，
-        // 避免 detach 之后再次解引用可能已被 attach/sweep 释放的 session。
+        // closing 且 refs 变为 0 的会话交给 sweep 回收。不在这里拿着裸 Session*
+        // 去抢 manager 锁：sweep 可能已经先把它释放，指针身份比较虽然不 deref，
+        // 但多一次跨锁生命周期判断只会更脆弱。
     }
 
     /// 前端主动 {t:"close"}：立刻结束 shell，而不是留在后台等 TTL。
     pub fn destroyAttached(self: *Manager, att: *Attachment) void {
-        const session = att.session orelse return;
+        const session = att.session orelse {
+            att.alive.store(false, .release);
+            return;
+        };
         att.session = null;
-        att.alive = false;
+        att.alive.store(false, .release);
         // 先叫醒可能正卡在写终端输出的 pump，再拿 session 锁，避免关闭分屏被慢客户端拖住。
         att.stream.shutdown(self.io, .both) catch {};
 
-        session.mutex.lockUncancelable(self.io);
-        const was_current = session.attachment == att;
-        if (was_current) session.attachment = null;
-        session.mutex.unlock(self.io);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        // 释放引用必须和 session 的事件在同一把锁下；释放后不再解引用 session。
+        var destroy_now = false;
+        var stop_now = false;
+        if (self.containsLocked(session)) {
+            session.mutex.lockUncancelable(self.io);
+            const was_current = session.attachment == att;
+            if (was_current) session.attachment = null;
+            if (session.attachments > 0) session.attachments -= 1;
+            const left = session.attachments;
+            if (was_current and left > 0) {
+                // 旧前端被顶掉后还没 detach；先把 shell/pump 停掉，等最后一个 ref。
+                session.closing = true;
+                stop_now = true;
+            } else if (left == 0 and session.attachment == null and
+                (was_current or session.closing))
+            {
+                destroy_now = true;
+            }
+            session.mutex.unlock(self.io);
+        }
 
         _ = self.live_attachments.fetchSub(1, .acq_rel);
 
-        // 已经被别的连接接管时，不能替对方把会话杀掉。
-        if (!was_current) return;
-
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.containsLocked(session)) self.destroyLocked(session);
+        if (stop_now) self.stopLocked(session);
+        if (destroy_now) self.destroyLocked(session);
     }
 
     /// 定期回收：没有前端且空闲超过 pty_idle_minutes 的会话，以及已经退出的会话。
@@ -212,9 +247,15 @@ pub const Manager = struct {
         var i: usize = 0;
         while (i < self.sessions.items.len) {
             const s = self.sessions.items[i];
-            s.mutex.lockUncancelable(self.io);
-            const detached = s.attachment == null;
-            const expired = if (s.closed)
+            // 不阻塞在可能卡住写 socket 的 session 上；下一轮再试。
+            if (!s.mutex.tryLock()) {
+                i += 1;
+                continue;
+            }
+            const detached = s.attachment == null and s.attachments == 0;
+            const expired = if (s.closing)
+                true
+            else if (s.closed)
                 ts - s.closed_ns > closed_grace_ns
             else if (idle_minutes == 0)
                 true
@@ -250,7 +291,7 @@ pub const Manager = struct {
         for (self.sessions.items) |s| {
             s.mutex.lockUncancelable(self.io);
             if (s.attachment) |att| {
-                att.alive = false;
+                att.alive.store(false, .release);
                 att.stream.shutdown(self.io, .both) catch {};
             }
             s.mutex.unlock(self.io);
@@ -298,9 +339,9 @@ pub const Manager = struct {
         var victim: ?*Session = null;
         var victim_score: i96 = std.math.maxInt(i96);
         for (self.sessions.items) |s| {
-            s.mutex.lockUncancelable(self.io);
-            const free = s.attachment == null;
-            const score: i96 = if (s.closed) 0 else s.last_activity_ns;
+            if (!s.mutex.tryLock()) continue;
+            const free = s.attachment == null and s.attachments == 0;
+            const score: i96 = if (s.closed or s.closing) 0 else s.last_activity_ns;
             s.mutex.unlock(self.io);
             if (free and score < victim_score) {
                 victim_score = score;
@@ -369,6 +410,21 @@ pub const Manager = struct {
         return s;
     }
 
+    /// 先停 shell 和 pump，但不回收内存；旧 Attachment 还可能用着 Session/master。
+    fn stopLocked(self: *Manager, s: *Session) void {
+        // 后台作业会被 job control 拆到新的进程组，单杀 -pid 收不干净；
+        // 先按 session id 扫一遍 /proc，再 HUP shell（pump 用 poll + stopping，
+        // 不依赖 slave 先关闭，避免 join 永久卡住）。
+        s.stopping.store(true, .release);
+        killSessionProcesses(self.io, s.child);
+        _ = linux.kill(-s.child, .HUP);
+        _ = linux.kill(s.child, .HUP);
+        if (s.pump_thread) |t| {
+            t.join();
+            s.pump_thread = null;
+        }
+    }
+
     fn destroyLocked(self: *Manager, s: *Session) void {
         for (self.sessions.items, 0..) |item, i| {
             if (item == s) {
@@ -377,14 +433,7 @@ pub const Manager = struct {
             }
         }
 
-        // 后台作业会被 job control 拆到新的进程组，单杀 -pid 收不干净；
-        // 先按 session id 扫一遍 /proc，再 HUP shell（pump 用 poll + stopping，
-        // 不依赖 slave 先关闭，避免 join 永久卡住）。
-        s.stopping.store(true, .release);
-        killSessionProcesses(self.io, s.child);
-        _ = linux.kill(-s.child, .HUP);
-        _ = linux.kill(s.child, .HUP);
-        if (s.pump_thread) |t| t.join();
+        self.stopLocked(s);
         pty.reap(s.child);
         _ = linux.close(s.master);
         self.gpa.free(s.buf);
@@ -392,10 +441,12 @@ pub const Manager = struct {
     }
 };
 
-/// 结束 shell 所在的进程组；-pid 失败时再单独杀直接子进程。
+/// 结束 shell 所在的进程组；-pid 失败时再单独杀直接子进程，并回收僵尸。
 fn killChild(child: posix.pid_t) void {
     _ = linux.kill(-child, .KILL);
     _ = linux.kill(child, .KILL);
+    var status: i32 = 0;
+    _ = linux.waitpid(child, &status, 0);
 }
 
 /// 杀掉同一 session（sid == shell pid）里的所有进程，包括 job control 拆出去的
@@ -410,9 +461,25 @@ fn killSessionProcesses(io: Io, sid: posix.pid_t) void {
         if (pid <= 1 or pid == sid) continue;
 
         var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/proc/{s}/stat", .{entry.name}) catch continue;
+        const path_raw = std.fmt.bufPrint(&path_buf, "/proc/{s}/stat", .{entry.name}) catch continue;
+        path_buf[path_raw.len] = 0;
+        const path = path_buf[0..path_raw.len :0];
+        const fd = posix.openat(posix.AT.FDCWD, path, .{
+            .ACCMODE = .RDONLY,
+            .CLOEXEC = true,
+        }, 0) catch continue;
+        defer _ = linux.close(fd);
+
         var buf: [512]u8 = undefined;
-        const data = std.Io.Dir.cwd().readFile(io, path, &buf) catch continue;
+        // 进程可能在 readdir 和 open/read 之间退出；直接用原始系统调用并把
+        // ESRCH 当成“已经没了”，避免 std.Io 把 /proc 的竞态当成 programmer bug。
+        const rc = linux.read(fd, &buf, buf.len);
+        const n: usize = switch (linux.errno(rc)) {
+            .SUCCESS => rc,
+            else => continue,
+        };
+        if (n == 0) continue;
+        const data = buf[0..n];
 
         // "pid (comm) state ppid pgrp session ..."；comm 里可能有空格/括号。
         const rparen = std.mem.lastIndexOfScalar(u8, data, ')') orelse continue;
@@ -442,6 +509,11 @@ const Session = struct {
     /// 从创建到现在累计输出的字节数。
     total: u64 = 0,
     attachment: ?*Attachment = null,
+    /// 仍可能持有本 Session 指针的 Attachment 数量（包括被顶掉的旧前端）。
+    /// 只有它为 0 时才可以释放 Session。
+    attachments: u32 = 0,
+    /// 已决定销毁，但还有旧 Attachment 未 detach；最后一个 ref 负责真正回收。
+    closing: bool = false,
     /// destroy 时置位，让 pump 的 poll 循环尽快退出。
     stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     closed: bool = false,
@@ -553,9 +625,9 @@ fn refreshCwd(s: *Session, force: bool) void {
     if (!changed and !force) return;
 
     const att = s.attachment orelse return;
-    if (!att.alive) return;
+    if (!att.alive.load(.acquire)) return;
     sendCwd(s.manager, att, abs) catch {
-        att.alive = false;
+        att.alive.store(false, .release);
         att.stream.shutdown(s.manager.io, .both) catch {};
     };
 }
@@ -572,7 +644,10 @@ fn pump(s: *Session) void {
             continue;
         }
         if (fds[0].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) == 0) continue;
-        const n = posix.read(s.master, &read_buf) catch break;
+        const n = posix.read(s.master, &read_buf) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => break,
+        };
         if (n == 0) break;
 
         const io = s.manager.io;
@@ -582,9 +657,9 @@ fn pump(s: *Session) void {
         // 也不应该让会话永远不过期。
         if (s.attachment != null) s.last_activity_ns = s.now();
         if (s.attachment) |att| {
-            if (att.alive) {
+            if (att.alive.load(.acquire)) {
                 att.sendRaw(read_buf[0..n], .binary) catch {
-                    att.alive = false;
+                    att.alive.store(false, .release);
                     att.stream.shutdown(io, .both) catch {};
                 };
             }
@@ -598,7 +673,7 @@ fn pump(s: *Session) void {
     s.closed_ns = s.now();
     if (!s.stopping.load(.acquire)) {
         if (s.attachment) |att| {
-            if (att.alive) {
+            if (att.alive.load(.acquire)) {
                 att.sendText("{\"t\":\"exit\"}") catch {};
                 att.sendRaw("", .connection_close) catch {};
                 att.stream.shutdown(io, .both) catch {};
@@ -636,6 +711,7 @@ pub fn serve(
     manager.attach(&att, session_id, offset) catch |err| {
         const body = switch (err) {
             error.TooManySessions => "{\"t\":\"error\",\"reason\":\"too_many_sessions\"}",
+            error.SessionBusy => "{\"t\":\"error\",\"reason\":\"session_busy\"}",
             error.PtySpawnFailed => "{\"t\":\"error\",\"reason\":\"pty_failed\"}",
             else => "{\"t\":\"error\"}",
         };

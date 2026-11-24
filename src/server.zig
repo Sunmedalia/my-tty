@@ -238,12 +238,13 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     }
 
     shutting_down.store(true, .release);
+    // 必须先唤醒连接，再 join 维护线程：维护线程可能在 sweep() 里等一个
+    // 卡在慢客户端写入上的 session 锁；连接不先 shutdown，就会永远 join 不返回。
+    shutdownAllConnections(io);
     if (maint) |t| t.join();
 
     std.debug.print("正在退出：回收 shell…\n", .{});
-    // 先唤醒所有连接线程，再等它们退出。fs/auth_state/limiter/manager 都在
-    // 本函数的栈上，绝不能在线程还在使用时返回（否则就是 use-after-free）。
-    shutdownAllConnections(io);
+    // fs/auth_state/limiter/manager 都在本函数的栈上，绝不能在线程还在使用时返回。
     var waited: u32 = 0;
     while (active_connections.load(.acquire) > 0 and waited < 500) : (waited += 1) {
         Io.sleep(io, Io.Duration.fromMilliseconds(10), .real) catch break;
@@ -315,15 +316,15 @@ fn connectionMain(
         switch (request.upgradeRequested()) {
             .websocket => |maybe_key| {
                 const key = maybe_key orelse {
-                    respond(&request, "bad websocket request\n", .bad_request) catch {};
+                    respondClose(&request, "bad websocket request\n", .bad_request) catch {};
                     return;
                 };
                 if (!originAllowed(&request, peerIsLoopback(peer))) {
-                    respond(&request, "origin not allowed\n", .forbidden) catch {};
+                    respondClose(&request, "origin not allowed\n", .forbidden) catch {};
                     return;
                 }
                 if (!wsAuthorized(auth_state, &request)) {
-                    respond(&request, "unauthorized\n", .unauthorized) catch {};
+                    respondClose(&request, "unauthorized\n", .unauthorized) catch {};
                     return;
                 }
                 // 终端可能空闲很久；上面已经 disarm，不再参与 HTTP 空闲清理。
@@ -336,11 +337,18 @@ fn connectionMain(
                 return;
             },
             .other => {
-                respond(&request, "unsupported upgrade\n", .bad_request) catch {};
+                respondClose(&request, "unsupported upgrade\n", .bad_request) catch {};
                 return;
             },
             .none => {
                 handleHttp(io, gpa, cfg, fs, auth_state, limiter, peer, stream.socket.handle, &request) catch return;
+                // 客户端要求关闭，或请求 body 没有干净读完时，绝不能在同一个连接上
+                // 继续解析下一段字节：残余 body 会被当成新请求（请求走私/响应错位）。
+                if (!request.head.keep_alive) return;
+                switch (server.reader.state) {
+                    .ready => {},
+                    else => return,
+                }
             },
         }
     }
@@ -360,6 +368,22 @@ fn handleHttp(
     const path = util.pathOnly(request.head.target);
     // X-Forwarded-* 只有本机反向代理才有资格设置；直连客户端伪造的不认。
     const trust_forwarded = peerIsLoopback(peer);
+
+    // 只有登录和文件写入/上传会读取请求体。其余路径一旦带 body 就直接关闭，
+    // 既不 drain 一个可能永远发不完的 body，也不给 std.http 的 keep-alive
+    // 逻辑机会把残余字节解释成下一个请求。
+    if (requestHasBody(request) and !acceptsRequestBody(path, request.head.method)) {
+        return respondClose(request, "{\"error\":\"unexpected_body\"}\n", .bad_request);
+    }
+
+    // 浏览器发起的写操作必须来自当前站点。SameSite=Strict 是第一层防护，
+    // 这里再显式校验 Origin，覆盖同站子域/localhost 不同端口等 Cookie 仍会发送的场景。
+    // 非浏览器客户端可以不带 Origin（curl/自动化工具），不影响现有用法。
+    if (request.head.method != .GET and request.head.method != .HEAD and
+        !originAllowed(request, trust_forwarded))
+    {
+        return respondClose(request, "{\"error\":\"bad_origin\"}\n", .forbidden);
+    }
 
     // 唯一的例外：登录端点本身。没有它就无法获得会话。
     if (std.mem.eql(u8, path, "/api/auth/login")) {
@@ -419,7 +443,7 @@ fn handleLogin(
     trust_forwarded: bool,
     request: *http.Server.Request,
 ) !void {
-    if (request.head.method != .POST) return respond(request, "method not allowed\n", .method_not_allowed);
+    if (request.head.method != .POST) return respondClose(request, "method not allowed\n", .method_not_allowed);
 
     if (limiter.blockedSeconds(peer)) |retry| {
         var retry_buf: [24]u8 = undefined;
@@ -429,17 +453,28 @@ fn handleLogin(
             .{ .name = "content-type", .value = "application/json; charset=utf-8" },
             .{ .name = "retry-after", .value = retry_text },
         });
-        return request.respond("{\"error\":\"too_many_attempts\"}", .{ .status = .too_many_requests, .extra_headers = list });
+        return request.respond("{\"error\":\"too_many_attempts\"}", .{
+            .status = .too_many_requests,
+            .extra_headers = list,
+            .keep_alive = false,
+        });
     }
 
     // 读 body 之后 head/header 迭代器不再可用，先把 Cookie 相关判断做掉。
     const secure = auth.isSecureRequest(request, trust_forwarded);
 
+    if (request.head.content_length) |len| {
+        if (len > 4096) return respondClose(request, "{\"error\":\"bad_body\"}\n", .payload_too_large);
+    }
+
     var body_buf: [4096]u8 = undefined;
-    const reader = request.readerExpectContinue(&body_buf) catch return respond(request, "{\"error\":\"bad_body\"}\n", .bad_request);
+    const reader = request.readerExpectContinue(&body_buf) catch
+        return respondClose(request, "{\"error\":\"bad_body\"}\n", .bad_request);
     const body = reader.allocRemaining(gpa, .limited(4096)) catch
-        return respond(request, "{\"error\":\"bad_body\"}\n", .bad_request);
+        return respondClose(request, "{\"error\":\"bad_body\"}\n", .bad_request);
     defer gpa.free(body);
+    if (!requestBodyComplete(request))
+        return respondClose(request, "{\"error\":\"bad_body\"}\n", .bad_request);
 
     var parsed = std.json.parseFromSlice(LoginRequest, gpa, body, .{ .ignore_unknown_fields = true }) catch
         return respond(request, "{\"error\":\"bad_body\"}\n", .bad_request);
@@ -617,10 +652,13 @@ fn authorized(auth_state: *auth.Auth, request: *const http.Server.Request) bool 
 }
 
 /// WebSocket：会话 Cookie 或一次性票据都行（浏览器/自动化客户端各取所需）。
+/// 票据优先消费：浏览器通常同时带 Cookie 和票据，若先认 Cookie，URL 里的票据
+/// 会一直留到 30 秒过期，代理日志泄漏时仍可被复用。
 fn wsAuthorized(auth_state: *auth.Auth, request: *const http.Server.Request) bool {
-    if (authorized(auth_state, request)) return true;
-    const ticket = util.queryParam(request.head.target, "ticket") orelse return false;
-    return auth_state.consumeTicket(ticket);
+    if (util.queryParam(request.head.target, "ticket")) |ticket| {
+        if (auth_state.consumeTicket(ticket)) return true;
+    }
+    return authorized(auth_state, request);
 }
 
 /// 对端是否为本机（127.0.0.0/8 或 ::1）。
@@ -673,8 +711,30 @@ fn originAllowed(request: *const http.Server.Request, trust_forwarded: bool) boo
     return std.ascii.eqlIgnoreCase(trimmed, expected);
 }
 
+fn requestHasBody(request: *const http.Server.Request) bool {
+    if (request.head.transfer_encoding != .none) return true;
+    if (request.head.content_length) |len| return len != 0;
+    return false;
+}
+
+fn requestBodyComplete(request: *const http.Server.Request) bool {
+    return switch (request.server.reader.state) {
+        .ready => true,
+        else => false,
+    };
+}
+
+/// 只允许这些端点自己读取 body；其余请求体一律拒绝。
+fn acceptsRequestBody(path: []const u8, method: http.Method) bool {
+    if (std.mem.eql(u8, path, "/api/auth/login")) return method == .POST;
+    if (std.mem.eql(u8, path, "/api/fs/write")) return method == .PUT;
+    if (std.mem.eql(u8, path, "/api/fs/upload")) return method == .PUT;
+    return false;
+}
+
 fn deny(request: *http.Server.Request) !void {
-    return respond(request, "{\"error\":\"unauthorized\"}\n", .unauthorized);
+    // 未认证请求可能带着一个永远不会发完的 body；不要为了 keep-alive 去 drain 它。
+    return respondClose(request, "{\"error\":\"unauthorized\"}\n", .unauthorized);
 }
 
 fn respond(request: *http.Server.Request, body: []const u8, status: http.Status) !void {
@@ -684,6 +744,20 @@ fn respond(request: *http.Server.Request, body: []const u8, status: http.Status)
         .{ .name = "cache-control", .value = "no-store" },
     });
     return request.respond(body, .{ .status = status, .extra_headers = list });
+}
+
+/// 请求体没有完整读完时用这个：明确让客户端关闭连接，避免残余 body 被当作下一个请求。
+fn respondClose(request: *http.Server.Request, body: []const u8, status: http.Status) !void {
+    var headers: [8]http.Header = undefined;
+    const list = buildHeaders(&headers, &.{
+        .{ .name = "content-type", .value = "text/plain; charset=utf-8" },
+        .{ .name = "cache-control", .value = "no-store" },
+    });
+    return request.respond(body, .{
+        .status = status,
+        .extra_headers = list,
+        .keep_alive = false,
+    });
 }
 
 fn buildHeaders(dst: []http.Header, extra: []const http.Header) []const http.Header {
