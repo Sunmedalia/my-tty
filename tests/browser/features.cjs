@@ -127,7 +127,9 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.mouse.move(ws.x + ws.w * 0.7, ws.y + ws.h / 2, { steps: 5 });
   await page.mouse.up();
   await page.waitForTimeout(400);
-  const cols = await page.evaluate(() => document.querySelector("#workspace").style.gridTemplateColumns);
+  const cols = await page.evaluate(
+    () => document.querySelector(".tab-workspace:not([hidden])").style.gridTemplateColumns
+  );
   const [c1, c2] = cols.split(" ").map(parseFloat);
   assert(Math.abs(c1 - 0.7) < 0.02 && Math.abs(c2 - 0.3) < 0.02, "splitter moved: " + cols);
 
@@ -142,7 +144,9 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.mouse.move(ws.x + ws.w * 0.8, ws.y + ws.h * 0.7, { steps: 5 });
   await page.mouse.up();
   await page.waitForTimeout(400);
-  const rows = await page.evaluate(() => document.querySelector("#workspace").style.gridTemplateRows);
+  const rows = await page.evaluate(
+    () => document.querySelector(".tab-workspace:not([hidden])").style.gridTemplateRows
+  );
   const [r1, r2] = rows.split(" ").map(parseFloat);
   assert(Math.abs(r1 - 0.7) < 0.02 && Math.abs(r2 - 0.3) < 0.02, "horizontal splitter moved: " + rows);
 

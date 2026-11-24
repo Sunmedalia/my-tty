@@ -104,6 +104,84 @@ button:focus-visible {
   text-overflow: ellipsis;
 }
 
+#tabbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+}
+
+#tab-list {
+  display: flex;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+#tab-list::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  max-width: 190px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #1a1f2b;
+  overflow: hidden;
+}
+
+.tab.active {
+  background: #272f40;
+  border-color: #3a4356;
+}
+
+.tab-label {
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  padding: 5px 8px;
+  font-size: 12px;
+  max-width: 155px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab.active .tab-label {
+  color: var(--fg);
+}
+
+.tab-close {
+  border: 0;
+  background: transparent;
+  color: var(--dim);
+  padding: 5px 7px;
+  font-size: 11px;
+}
+
+.tab-close:hover {
+  color: var(--err);
+}
+
+.tab.down .tab-label {
+  color: var(--err);
+}
+
+#tab-add {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+}
+
 #body {
   flex: 1 1 auto;
   display: flex;
@@ -261,10 +339,21 @@ button.icon {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
+  position: relative;
+  background: var(--line);
+}
+
+.tab-workspace {
+  position: absolute;
+  inset: 0;
   display: grid;
   gap: 1px;
   background: var(--line);
   grid-auto-flow: row;
+}
+
+.tab-workspace[hidden] {
+  display: none;
 }
 
 .pane {
@@ -912,6 +1001,17 @@ button.icon {
   #login-password {
     /* iOS 在字体小于 16px 时会自动放大页面。 */
     font-size: 16px;
+  }
+
+  #tabbar {
+    height: 38px;
+    padding: 0 6px;
+  }
+
+  .tab-label,
+  .tab-close,
+  #tab-add {
+    min-height: 32px;
   }
 
   #bar {

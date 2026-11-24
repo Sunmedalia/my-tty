@@ -2,8 +2,11 @@
   "use strict";
 
   const MAX_PANES = 4;
+  const MAX_TABS = 8;
 
   const workspace = document.getElementById("workspace");
+  const tabListEl = document.getElementById("tab-list");
+  const tabAddBtn = document.getElementById("tab-add");
   const addPaneBtn = document.getElementById("add-pane");
   const filesBtn = document.getElementById("toggle-files");
   const filesEl = document.getElementById("files");
@@ -55,7 +58,11 @@
     typeof window.matchMedia === "function" &&
     window.matchMedia("(pointer: coarse)").matches;
 
-  const panes = [];
+  // 每个标签页有自己的 pane 数组；`panes` 始终指向当前标签页的数组。
+  const tabs = [];
+  let activeTab = null;
+  let tabSeq = 0;
+  let panes = [];
   let activePane = null;
   let currentDir = "";
   let editing = null; // { path, dirty }
@@ -69,10 +76,123 @@
     return Math.min(24, Math.max(10, n));
   }
 
+  // ---------------------------------------------------------------- tabs
+
+  function updateTabHint() {
+    tabAddBtn.disabled = tabs.length >= MAX_TABS;
+  }
+
+  function addTab() {
+    if (tabs.length >= MAX_TABS) return null;
+
+    const el = document.createElement("div");
+    el.className = "tab-workspace";
+    el.hidden = true;
+    workspace.appendChild(el);
+
+    const btn = document.createElement("div");
+    btn.className = "tab";
+    btn.setAttribute("role", "tab");
+    btn.setAttribute("aria-selected", "false");
+
+    const label = document.createElement("button");
+    label.type = "button";
+    label.className = "tab-label";
+    label.textContent = `终端 ${++tabSeq}`;
+
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "tab-close";
+    close.title = "关闭标签页";
+    close.textContent = "✕";
+
+    btn.appendChild(label);
+    btn.appendChild(close);
+    tabListEl.appendChild(btn);
+
+    const tab = { el, btn, label, panes: [], activePane: null, splitX: 0.5, splitY: 0.5 };
+    tabs.push(tab);
+
+    btn.addEventListener("click", () => activateTab(tab));
+    close.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      closeTab(tab);
+    });
+
+    updateTabHint();
+    return tab;
+  }
+
+  function newTab() {
+    const tab = addTab();
+    if (!tab) return;
+    activateTab(tab);
+    createPane("", tab);
+  }
+
+  function activateTab(tab) {
+    if (!tab || tab === activeTab) return;
+
+    if (activeTab) {
+      activeTab.splitX = splitX;
+      activeTab.splitY = splitY;
+      activeTab.activePane = activePane;
+      activeTab.el.hidden = true;
+      activeTab.btn.classList.remove("active");
+      activeTab.btn.setAttribute("aria-selected", "false");
+      if (activePane) activePane.term.blur();
+    }
+
+    activeTab = tab;
+    panes = tab.panes;
+    splitX = tab.splitX;
+    splitY = tab.splitY;
+    activePane =
+      tab.activePane && tab.panes.includes(tab.activePane)
+        ? tab.activePane
+        : tab.panes[tab.panes.length - 1] || null;
+
+    tab.el.hidden = false;
+    tab.btn.classList.add("active");
+    tab.btn.setAttribute("aria-selected", "true");
+    for (const p of panes) p.el.classList.toggle("active", p === activePane);
+
+    layout(tab);
+    updateSummary();
+    saveSessions();
+    requestAnimationFrame(() => {
+      for (const p of tab.panes) fitPane(p);
+      if (activePane && !coarsePointer) activePane.term.focus();
+    });
+  }
+
+  function closeTab(tab) {
+    const idx = tabs.indexOf(tab);
+    if (idx === -1) return;
+
+    for (const pane of [...tab.panes]) removePane(pane, false);
+    tab.el.remove();
+    tab.btn.remove();
+    tabs.splice(idx, 1);
+    if (tabs.length === 0) tabSeq = 0;
+
+    if (activeTab === tab) {
+      activeTab = null;
+      panes = [];
+      activePane = null;
+      const next = tabs[Math.min(idx, tabs.length - 1)];
+      if (next) activateTab(next);
+      else newTab();
+    }
+
+    updateTabHint();
+    saveSessions();
+  }
+
   // ---------------------------------------------------------------- terminals
 
-  function createPane(initialSession = "") {
-    if (panes.length >= MAX_PANES) return;
+  function createPane(initialSession = "", tab = activeTab) {
+    if (!tab || tab.panes.length >= MAX_PANES) return;
 
     const el = document.createElement("section");
     el.className = "pane";
@@ -83,7 +203,7 @@
         <button class="pane-close" type="button" title="关闭此分屏">✕</button>
       </div>
       <div class="pane-term"></div>`;
-    workspace.appendChild(el);
+    tab.el.appendChild(el);
 
     const termEl = el.querySelector(".pane-term");
     const bar = el.querySelector(".pane-bar");
@@ -232,6 +352,7 @@
 
     const pane = {
       el,
+      tab,
       termEl,
       term,
       fit,
@@ -245,7 +366,9 @@
       alive: false,
       reconnect: null,
     };
-    panes.push(pane);
+    tab.panes.push(pane);
+    tab.activePane = pane;
+    if (tab === activeTab) panes = tab.panes;
 
     term.attachCustomKeyEventHandler((event) => handleTermKey(event, pane));
     term.onData((data) => sendInput(pane, data));
@@ -262,18 +385,24 @@
     });
 
     connectPane(pane);
-    layout();
-    focusPane(pane);
+    layout(tab);
+    if (tab === activeTab) focusPane(pane);
+    saveSessions();
   }
 
   function focusPane(pane) {
+    if (!pane) return;
+    if (pane.tab && pane.tab !== activeTab) activateTab(pane.tab);
     activePane = pane;
+    if (pane.tab) pane.tab.activePane = pane;
     for (const p of panes) p.el.classList.toggle("active", p === pane);
-    if (pane) pane.term.focus();
+    pane.term.focus();
   }
 
   function removePane(pane, respawn = true) {
-    const idx = panes.indexOf(pane);
+    const tab = pane.tab;
+    const list = tab ? tab.panes : panes;
+    const idx = list.indexOf(pane);
     if (idx === -1) return;
     if (pane.ws) {
       // 显式关闭分屏 = 结束这个会话；页面刷新/断网不会发这条消息。
@@ -289,25 +418,38 @@
     }
     pane.term.dispose();
     pane.el.remove();
-    panes.splice(idx, 1);
-    if (activePane === pane) {
-      activePane = panes[Math.min(idx, panes.length - 1)] || null;
+    list.splice(idx, 1);
+
+    if (tab && tab.activePane === pane) tab.activePane = null;
+    if (tab === activeTab && activePane === pane) {
+      activePane = list[Math.min(idx, list.length - 1)] || null;
+      if (tab) tab.activePane = activePane;
       if (activePane) focusPane(activePane);
+      else for (const p of panes) p.el.classList.remove("active");
     }
+
     pane.sessionId = "";
     saveSessions();
-    if (panes.length === 0) {
-      if (respawn && started) createPane();
-    } else {
-      layout();
+    if (list.length === 0) {
+      if (respawn && started && tab) createPane("", tab);
+    } else if (tab === activeTab) {
+      layout(tab);
     }
+    if (tab === activeTab) updateSummary();
   }
 
   function saveSessions() {
     try {
       sessionStorage.setItem(
-        "myttty.sessions",
-        JSON.stringify(panes.map((p) => p.sessionId || ""))
+        "myttty.tabs",
+        JSON.stringify({
+          active: Math.max(0, tabs.indexOf(activeTab)),
+          tabs: tabs.map((t) => ({
+            x: t.splitX,
+            y: t.splitY,
+            s: t.panes.map((p) => p.sessionId || ""),
+          })),
+        })
       );
     } catch (_) {}
   }
@@ -331,6 +473,9 @@
       return;
     }
 
+    // pane 可能在等待 ticket 时被关闭，或所在标签页被删掉。
+    if (!pane.el.isConnected) return;
+
     let url = `${wsBase}?ticket=${encodeURIComponent(ticket)}&offset=${pane.offset}`;
     if (pane.sessionId) url += `&session=${encodeURIComponent(pane.sessionId)}`;
 
@@ -349,8 +494,9 @@
       pane.alive = true;
       setPaneStatus(pane, "已连接", "ok");
       fitPane(pane);
-      // 点击状态栏重连后把焦点还给终端，否则接下来的按键会落到 body 上。
-      focusPane(pane);
+      // 点击状态栏重连后把焦点还给终端，否则接下来的按键会落到 body 上；
+      // 后台标签页连上时不能把用户切走。
+      if (pane.tab === activeTab) focusPane(pane);
       updateSummary();
     };
     ws.onmessage = (event) => {
@@ -408,6 +554,12 @@
     pane.dot.className = `pane-dot ${kind || ""}`;
     // 悬浮标题栏默认隐藏；出错时常驻，方便点击重连/关闭。
     pane.bar.classList.toggle("attention", kind === "error");
+    if (pane.tab) {
+      pane.tab.btn.classList.toggle(
+        "down",
+        pane.tab.panes.some((p) => p.status.classList.contains("error"))
+      );
+    }
     updateSummary();
   }
 
@@ -444,6 +596,8 @@
   }
 
   function fitPane(pane) {
+    // 后台标签页 / 被隐藏的 pane 量不到尺寸，强行 fit 会把终端缩成 2x1。
+    if (!pane.el.isConnected || pane.el.offsetParent === null) return;
     try {
       pane.fit.fit();
     } catch (_) {
@@ -478,6 +632,7 @@
     if (!splitters.v) {
       const v = document.createElement("div");
       v.className = "splitter v";
+      v.hidden = true;
       v.addEventListener("pointerdown", (ev) => startSplitDrag(ev, "x"));
       workspace.appendChild(v);
       splitters.v = v;
@@ -485,6 +640,7 @@
     if (!splitters.h) {
       const h = document.createElement("div");
       h.className = "splitter h";
+      h.hidden = true;
       h.addEventListener("pointerdown", (ev) => startSplitDrag(ev, "y"));
       workspace.appendChild(h);
       splitters.h = h;
@@ -496,6 +652,7 @@
   }
 
   function startSplitDrag(ev, axis) {
+    if (!activeTab) return;
     ev.preventDefault();
     const el = ev.currentTarget;
     el.setPointerCapture(ev.pointerId);
@@ -505,69 +662,75 @@
       const r = workspace.getBoundingClientRect();
       if (axis === "x") {
         splitX = clampSplit((e.clientX - r.left) / r.width);
+        activeTab.splitX = splitX;
         localStorage.setItem("myttty.splitX", String(splitX));
       } else {
         splitY = clampSplit((e.clientY - r.top) / r.height);
+        activeTab.splitY = splitY;
         localStorage.setItem("myttty.splitY", String(splitY));
       }
-      applyGrid();
+      applyGrid(activeTab);
     };
     const up = () => {
       el.classList.remove("dragging");
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
       el.removeEventListener("pointercancel", up);
+      saveSessions();
     };
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
     el.addEventListener("pointercancel", up);
   }
 
-  function positionSplitters() {
-    const n = panes.length;
+  function positionSplitters(tab) {
+    const n = tab.panes.length;
     if (splitters.v) {
       splitters.v.hidden = n < 2;
-      splitters.v.style.left = `${splitX * 100}%`;
+      splitters.v.style.left = `${tab.splitX * 100}%`;
     }
     if (splitters.h) {
       // 3 屏时只有右列上下分，横把手从竖直分栏处开始，避免切到左边整高的 pane。
       splitters.h.hidden = n < 3;
-      splitters.h.style.top = `${splitY * 100}%`;
-      splitters.h.style.left = n === 3 ? `${splitX * 100}%` : "0";
+      splitters.h.style.top = `${tab.splitY * 100}%`;
+      splitters.h.style.left = n === 3 ? `${tab.splitX * 100}%` : "0";
     }
   }
 
-  function applyGrid() {
-    const n = panes.length;
-    for (const p of panes) p.el.style.gridArea = "";
+  function applyGrid(tab) {
+    const n = tab.panes.length;
+    for (const p of tab.panes) p.el.style.gridArea = "";
 
-    const cols = n >= 2 ? `${splitX}fr ${1 - splitX}fr` : "1fr";
+    const cols = n >= 2 ? `${tab.splitX}fr ${1 - tab.splitX}fr` : "1fr";
     if (n === 3) {
-      workspace.style.gridTemplateColumns = cols;
-      workspace.style.gridTemplateRows = `${splitY}fr ${1 - splitY}fr`;
-      panes[0].el.style.gridArea = "1 / 1 / span 2 / span 1";
+      tab.el.style.gridTemplateColumns = cols;
+      tab.el.style.gridTemplateRows = `${tab.splitY}fr ${1 - tab.splitY}fr`;
+      tab.panes[0].el.style.gridArea = "1 / 1 / span 2 / span 1";
     } else if (n === 4) {
-      workspace.style.gridTemplateColumns = cols;
-      workspace.style.gridTemplateRows = `${splitY}fr ${1 - splitY}fr`;
+      tab.el.style.gridTemplateColumns = cols;
+      tab.el.style.gridTemplateRows = `${tab.splitY}fr ${1 - tab.splitY}fr`;
     } else if (n === 2) {
-      workspace.style.gridTemplateColumns = cols;
-      workspace.style.gridTemplateRows = "1fr";
+      tab.el.style.gridTemplateColumns = cols;
+      tab.el.style.gridTemplateRows = "1fr";
     } else {
-      workspace.style.gridTemplateColumns = "1fr";
-      workspace.style.gridTemplateRows = "1fr";
+      tab.el.style.gridTemplateColumns = "1fr";
+      tab.el.style.gridTemplateRows = "1fr";
     }
 
-    positionSplitters();
+    if (tab !== activeTab) return;
+    positionSplitters(tab);
     requestAnimationFrame(() => {
-      for (const p of panes) fitPane(p);
+      for (const p of tab.panes) fitPane(p);
     });
   }
 
-  function layout() {
-    workspace.dataset.count = String(panes.length);
+  function layout(tab = activeTab) {
+    if (!tab) return;
+    tab.el.dataset.count = String(tab.panes.length);
     ensureSplitters();
-    applyGrid();
-    addPaneBtn.disabled = panes.length >= MAX_PANES;
+    applyGrid(tab);
+    if (tab !== activeTab) return;
+    addPaneBtn.disabled = tab.panes.length >= MAX_PANES;
     updateSummary();
   }
 
@@ -1113,6 +1276,7 @@
   // -------------------------------------------------------------------- boot
 
   addPaneBtn.addEventListener("click", () => createPane());
+  tabAddBtn.addEventListener("click", () => newTab());
 
   findInput.addEventListener("input", () => runFind(false, true));
   findInput.addEventListener("keydown", (ev) => {
@@ -1297,9 +1461,11 @@
   function setFontSize(next) {
     fontsize = clampFont(next);
     localStorage.setItem("myttty.fontsize", String(fontsize));
-    for (const p of panes) {
-      p.term.options.fontSize = fontsize;
-      fitPane(p);
+    for (const tab of tabs) {
+      for (const p of tab.panes) {
+        p.term.options.fontSize = fontsize;
+        if (tab === activeTab) fitPane(p);
+      }
     }
   }
 
@@ -1421,31 +1587,80 @@
       await document.fonts.load('14px "JetBrains Mono"');
       await document.fonts.ready;
     } catch (_) {}
-    if (panes.length === 0) {
-      let restored = 0;
-      try {
-        const saved = JSON.parse(sessionStorage.getItem("myttty.sessions") || "[]");
-        if (Array.isArray(saved)) {
-          for (const sid of saved.slice(0, MAX_PANES)) {
-            if (typeof sid === "string" && /^[0-9a-f]{32}$/.test(sid)) {
-              createPane(sid);
-              restored += 1;
-            }
-          }
-        }
-      } catch (_) {}
-      if (restored === 0) createPane();
+    if (tabs.length === 0) {
+      const restored = restoreTabs();
+      if (!restored) newTab();
     } else {
       layout();
     }
     refreshFiles();
   }
 
+  function validSessionId(sid) {
+    return typeof sid === "string" && /^[0-9a-f]{32}$/.test(sid);
+  }
+
+  function restoreTabs() {
+    let saved = null;
+    try {
+      saved = JSON.parse(sessionStorage.getItem("myttty.tabs") || "null");
+    } catch (_) {}
+
+    if (saved && Array.isArray(saved.tabs) && saved.tabs.length) {
+      for (const t of saved.tabs.slice(0, MAX_TABS)) {
+        const tab = addTab();
+        if (!tab) break;
+        const sx = Number(t && t.x);
+        const sy = Number(t && t.y);
+        if (Number.isFinite(sx)) tab.splitX = clampSplit(sx);
+        if (Number.isFinite(sy)) tab.splitY = clampSplit(sy);
+        // 先让标签页可见再创建终端，避免在 display:none 的容器里 open()。
+        activateTab(tab);
+        const ids = Array.isArray(t && t.s) ? t.s.slice(0, MAX_PANES) : [];
+        for (const sid of ids) {
+          if (validSessionId(sid)) createPane(sid, tab);
+        }
+        if (tab.panes.length === 0) createPane("", tab);
+      }
+      const wanted = Number.isInteger(saved.active) ? saved.active : 0;
+      activateTab(tabs[Math.min(Math.max(wanted, 0), tabs.length - 1)]);
+      return true;
+    }
+
+    // 兼容旧版本：只有一组 pane 会话 id。
+    try {
+      const old = JSON.parse(sessionStorage.getItem("myttty.sessions") || "null");
+      if (Array.isArray(old) && old.length) {
+        const tab = addTab();
+        activateTab(tab);
+        for (const sid of old.slice(0, MAX_PANES)) {
+          if (validSessionId(sid)) createPane(sid, tab);
+        }
+        if (tab.panes.length === 0) createPane("", tab);
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   function stopApp() {
     started = false;
-    for (const pane of [...panes]) removePane(pane, false);
-    panes.length = 0;
+    for (const tab of [...tabs]) {
+      for (const pane of [...tab.panes]) removePane(pane, false);
+      tab.el.remove();
+      tab.btn.remove();
+    }
+    tabs.length = 0;
+    activeTab = null;
+    tabSeq = 0;
+    panes = [];
+    activePane = null;
+    if (splitters.v) splitters.v.hidden = true;
+    if (splitters.h) splitters.h.hidden = true;
+    updateTabHint();
+    updateSummary();
     try {
+      sessionStorage.removeItem("myttty.tabs");
       sessionStorage.removeItem("myttty.sessions");
     } catch (_) {}
   }

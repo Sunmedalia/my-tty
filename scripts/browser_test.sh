@@ -36,6 +36,7 @@ export BASE="http://127.0.0.1:$PORT"
 export PASSWORD ROOT
 
 node tests/browser/ui.cjs
+node tests/browser/tabs.cjs
 node tests/browser/features.cjs
 node tests/browser/clipboard.cjs
 node tests/browser/session.cjs
