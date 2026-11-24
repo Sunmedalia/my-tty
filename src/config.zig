@@ -28,8 +28,9 @@ pub const Config = struct {
     max_sessions: u32 = 16,
     /// 前端断开后 shell 的保留时间（分钟）；0 表示断开即回收。
     pty_idle_minutes: u32 = 30,
-    /// 文件管理/编辑的可访问根目录；所有路径都被限制在它下面。
-    root: []const u8 = ".",
+    /// 文件管理/编辑的可访问根目录；默认整个文件系统。
+    /// 如果只是想限制误操作，可以改成某个工作目录。
+    root: []const u8 = "/",
     /// 子进程继承的环境变量。
     environ: std.process.Environ = .empty,
 
@@ -60,7 +61,7 @@ pub const Config = struct {
         \\  --session-idle-hours <n>  空闲超时，默认 24 小时（0 关闭）
         \\  --max-connections <n>  最大并发连接，默认 64
         \\  --check-config       只校验配置与 root，然后退出
-        \\  --root <dir>         文件管理根目录（默认当前目录）
+        \\  --root <dir>         文件管理根目录（默认 /，即整个文件系统）
         \\  --max-sessions <n>   并发会话上限（默认 16）
         \\  --pty-idle-minutes <n>  断开后保留 shell 的分钟数（默认 30，0 关闭）
         \\  -h, --help           显示本帮助
@@ -74,7 +75,7 @@ pub const Config = struct {
         \\    "session_ttl_days": 7,
         \\    "session_idle_hours": 24,
         \\    "max_connections": 64,
-        \\    "root": "/srv/work",
+        \\    "root": "/",
         \\    "max_sessions": 16,
         \\    "pty_idle_minutes": 30
         \\  }

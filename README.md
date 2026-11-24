@@ -48,7 +48,7 @@ zig test src/tests.zig
   "session_ttl_days": 7,
   "session_idle_hours": 24,
   "max_connections": 64,
-  "root": "/srv/work",
+  "root": "/",
   "max_sessions": 16,
   "pty_idle_minutes": 30
 }
@@ -100,7 +100,8 @@ journalctl -u my-tty -f
 
 ## 文件管理与编辑
 
-左侧“文件”面板以 `--root`（默认当前目录）为边界，支持列目录、新建文件/目录、
+左侧“文件”面板默认访问整个文件系统；设置 `--root <dir>` 可以把它收窄到某个
+目录（主要是防误操作，不是针对已登录用户的安全边界），支持列目录、新建文件/目录、
 重命名、递归删除、上传/下载，以及纯文本编辑（≤1 MiB，`Ctrl+S` 保存）。
 新建、新建目录和重命名都使用页面内弹窗输入名称，不调用浏览器原生 `prompt`。
 上传可以点 ⇪、拖进面板，或拖到某个目录行；文件按 4 MiB 分片，带进度条和取消，
@@ -169,7 +170,8 @@ pane 标题栏改为固定在终端上方（不再悬浮遮挡内容）。
 - `X-Forwarded-Host` / `X-Forwarded-Proto` 只在对端是回环地址（本机反向代理）时信任；
   直连客户端伪造这两个头不会改变 Origin 校验或 Cookie 的 `Secure` 属性。
 - `SIGTERM`/`SIGINT` 会停止 accept、回收所有 PTY 后退出。
-- 文件管理/编辑只允许访问 `root` 下的真实路径，符号链接无法逃逸。
+- 文件管理/编辑只访问 `root` 下的真实路径；默认 `root=/`，需要收窄时用 `--root`。
+  这只是防误操作和收敛路径 bug，不构成对已登录终端用户的安全边界。
 - 会话数受 `max_sessions` 限制；分屏上限 4。
 
 TLS 不属于本项目：请让进程只监听回环地址，把明文 HTTP/WS 交给外部反向代理。
