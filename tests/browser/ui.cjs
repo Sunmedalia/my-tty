@@ -65,11 +65,24 @@ const near = (a, b, tol = 10) => Math.abs(a - b) <= tol;
   await page.waitForSelector("#file-list .entry");
   await page.locator("#file-list .entry.file", { hasText: "edit-me.txt" }).locator(".name").click();
   await page.waitForSelector("#editor-overlay:not([hidden])");
+  assert((await page.locator("#editor-save svg").count()) === 1, "editor save uses an svg icon");
+  assert((await page.locator("#editor-close svg").count()) === 1, "editor close uses an svg icon");
   await page.fill("#editor", "edited from browser\nsecond line\n");
   await page.keyboard.press("Control+KeyS");
   await page.waitForTimeout(800);
   assert(fs.readFileSync(path.join(ROOT, "edit-me.txt"), "utf8") === "edited from browser\nsecond line\n", "editor saved");
   await page.keyboard.press("Escape");
+
+  // 移动端只保留底部按键条里的一个 ^C。
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.waitForTimeout(250);
+  const visibleInterrupts = await page.evaluate(
+    () =>
+      [...document.querySelectorAll('#send-interrupt, #keys [data-key="ctrlc"]')].filter(
+        (el) => el.offsetParent !== null
+      ).length
+  );
+  assert(visibleInterrupts === 1, "mobile shows exactly one ^C button");
 
   await page.click("#logout");
   await page.waitForSelector("#login-overlay:not([hidden])");
