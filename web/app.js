@@ -1114,17 +1114,17 @@
     }
   }
 
-  function applyDir(path, force = false) {
+  function applyDir(path, force = false, alignTop = false) {
     currentDir = path;
     expandPath(path);
     // 面板关着时只记住位置，等打开时 refreshFiles() 一次性加载。
     if (filesEl.hidden) return;
     renderCrumbs();
     renderTree();
-    scrollTreeToSelected();
+    scrollTreeToSelected(alignTop);
     const pending = pathPrefixes(path).map((prefix) => ensureTreeLoaded(prefix, force));
     Promise.all(pending).then(() => {
-      if (currentDir === path && !filesEl.hidden) scrollTreeToSelected();
+      if (currentDir === path && !filesEl.hidden) scrollTreeToSelected(alignTop);
     });
   }
 
@@ -1137,7 +1137,7 @@
   /// 强制重读路径上的目录，终端里新建的目录也能立即出现在树里。
   function syncFilesToCwd(path) {
     if (typeof path !== "string" || path === currentDir) return;
-    applyDir(path, true);
+    applyDir(path, true, true);
   }
 
   function toggleDir(path) {
@@ -1241,11 +1241,16 @@
     fileList.scrollTop = scrollTop;
   }
 
-  function scrollTreeToSelected() {
+  function scrollTreeToSelected(alignTop = false) {
     const sel = fileList.querySelector(".entry.selected");
     if (!sel) return;
     const list = fileList.getBoundingClientRect();
     const row = sel.getBoundingClientRect();
+    if (alignTop) {
+      // cwd 同步时尽量把目标放到列表顶部，下面直接露出目录内容。
+      fileList.scrollTop = Math.max(0, fileList.scrollTop + (row.top - list.top) - 4);
+      return;
+    }
     if (row.top < list.top) {
       fileList.scrollTop -= list.top - row.top;
     } else if (row.bottom > list.bottom) {
@@ -1755,7 +1760,7 @@
     if (!filesEl.hidden) {
       refreshFiles()
         .then(() => {
-          if (!filesEl.hidden) scrollTreeToSelected();
+          if (!filesEl.hidden) scrollTreeToSelected(true);
         })
         .catch(() => {});
       requestAnimationFrame(() => panes.forEach(fitPane));

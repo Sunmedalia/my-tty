@@ -12,11 +12,12 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
 (async () => {
   const sub = path.join(ROOT, "cwd-sub");
   fs.mkdirSync(sub, { recursive: true });
-  // 足够多的同级目录，让后面的目标必须滚动才能看到。
-  const target = path.join(ROOT, "zzz-cwd-target");
+  // 足够多的同级目录，让目标前后都有内容，既需要滚动也能顶到列表顶部。
+  const target = path.join(ROOT, "mid-cwd-target");
   fs.mkdirSync(target, { recursive: true });
-  for (let i = 0; i < 50; i += 1) {
-    fs.mkdirSync(path.join(ROOT, `pad-${String(i).padStart(2, "0")}`), { recursive: true });
+  for (let i = 0; i < 40; i += 1) {
+    fs.mkdirSync(path.join(ROOT, `aaa-pad-${String(i).padStart(2, "0")}`), { recursive: true });
+    fs.mkdirSync(path.join(ROOT, `zzz-pad-${String(i).padStart(2, "0")}`), { recursive: true });
   }
 
   const browser = await chromium.launch({ executablePath: CHROME, args: ["--no-sandbox"] });
@@ -69,10 +70,10 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await waitCrumb("cwd-sub");
   assert((await activeCrumb()) === "cwd-sub", "pwd resyncs the tree");
 
-  // cd 到树中靠后的目录：除了选中，还要自动滚动到可见位置。
+  // cd 到树中靠后的目录：除了选中，还要尽量滚动到列表顶部。
   await page.locator(".pane-term").click();
   await page.keyboard.type(`cd '${target}'\r`);
-  await waitCrumb("zzz-cwd-target");
+  await waitCrumb("mid-cwd-target");
   await page.waitForFunction(
     () => {
       const list = document.querySelector("#file-list");
@@ -80,7 +81,8 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
       if (!sel) return false;
       const l = list.getBoundingClientRect();
       const r = sel.getBoundingClientRect();
-      return list.scrollTop > 0 && r.top >= l.top - 1 && r.bottom <= l.bottom + 1;
+      const gap = r.top - l.top;
+      return list.scrollTop > 0 && gap >= -1 && gap <= 12;
     },
     null,
     { timeout: 10000 }
