@@ -20,11 +20,16 @@
 ## 构建与运行
 
 ```sh
-zig build                 # 默认 Debug；发布用 zig build -Doptimize=safe
+zig build                    # Debug：带调试信息，体积大，仅本地调试用
 zig test src/tests.zig
 ./zig-out/bin/my-tty --port 7387 --password 'change-me'
 # 浏览器打开 http://127.0.0.1:7387/ ，在弹窗里输入密码
+
+./scripts/build-release.sh   # 发布：ReleaseSafe + strip，约 1.7 MiB
 ```
+
+`build-release.sh` 等价于 `zig build -Doptimize=safe && strip zig-out/bin/my-tty`。
+部署时用这个 strip 过的二进制，不要装十几 MiB 的 Debug 版本。
 
 不传 `--password` 时会随机生成一个，并打印到终端；重启会更换。
 
@@ -65,6 +70,7 @@ zig test src/tests.zig
 不用 Docker、不用容器、不需要任何运行时依赖。
 
 ```sh
+./scripts/build-release.sh              # 先构建 ReleaseSafe + strip
 sudo install -Dm755 zig-out/bin/my-tty /usr/local/bin/my-tty
 sudo useradd --system --create-home --home-dir /srv/work --shell /bin/bash my-tty
 sudo install -d -o root -g my-tty -m 750 /etc/my-tty
@@ -230,7 +236,7 @@ composed `insertText`，无条件清标记会让字符变成两个（`ls` → `l
 zig test src/tests.zig        # 配置、认证/会话、PTY 环境、协议、文件边界
 ./scripts/smoke.sh            # 真实进程：认证、文件/分片/归档、WS+PTY、优雅退出
 ./scripts/browser_test.sh     # 浏览器回归（先 npm --prefix tests/browser ci 并装 chromium）
-./scripts/build-release.sh    # ReleaseSafe + strip
+./scripts/build-release.sh    # ReleaseSafe + strip，约 1.7 MiB
 ```
 
 CI 在 `.github/workflows/ci.yml`：格式检查、构建、单测、smoke，以及独立的浏览器任务。
