@@ -62,16 +62,8 @@ pub const Manager = struct {
     sessions: std.ArrayList(*Session) = .empty,
     /// 当前还挂着的 WebSocket 前端数量；退出时用来判断是否可以安全释放会话。
     live_attachments: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-    /// 文件 API 的规范化根目录，用于把 shell 的绝对 cwd 转成相对路径。
-    fs_root: []const u8 = "",
-
-    pub fn init(
-        io: Io,
-        gpa: Allocator,
-        cfg: *const config.Config,
-        fs_root: []const u8,
-    ) Manager {
-        return .{ .io = io, .gpa = gpa, .cfg = cfg, .fs_root = fs_root };
+    pub fn init(io: Io, gpa: Allocator, cfg: *const config.Config) Manager {
+        return .{ .io = io, .gpa = gpa, .cfg = cfg };
     }
 
     /// 只释放列表本身；会话应当在 shutdown() 里清理干净。
@@ -172,7 +164,7 @@ pub const Manager = struct {
         }
 
         if (session.cwd_valid) {
-            sendCwd(self, att, session.cwd[0..session.cwd_len]) catch {};
+            sendCwd(att, session.cwd[0..session.cwd_len]) catch {};
         }
 
         session.attachment = att;
@@ -577,24 +569,18 @@ fn readProcCwd(io: Io, child: posix.pid_t, buf: []u8) ?usize {
     return std.Io.Dir.readLinkAbsolute(io, path, buf) catch null;
 }
 
-/// 文件 API 的 root 可能是 `/` 或某个绝对目录；只同步 root 内的 cwd。
-fn relativeCwd(root: []const u8, abs_raw: []const u8) ?[]const u8 {
+/// 把 shell 的绝对 cwd 转成相对 `/` 的路径；文件面板固定以 `/` 为根。
+fn relativeCwd(abs_raw: []const u8) ?[]const u8 {
     var abs = abs_raw;
     while (abs.len > 1 and abs[abs.len - 1] == '/') abs = abs[0 .. abs.len - 1];
 
-    if (std.mem.eql(u8, root, "/")) {
-        if (abs.len == 1 and abs[0] == '/') return "";
-        if (abs.len > 1 and abs[0] == '/') return abs[1..];
-        return null;
-    }
-    if (!std.mem.startsWith(u8, abs, root)) return null;
-    if (abs.len == root.len) return "";
-    if (abs[root.len] != '/') return null;
-    return abs[root.len + 1 ..];
+    if (abs.len == 1 and abs[0] == '/') return "";
+    if (abs.len > 1 and abs[0] == '/') return abs[1..];
+    return null;
 }
 
-fn sendCwd(manager: *Manager, att: *Attachment, abs_raw: []const u8) !void {
-    const rel = relativeCwd(manager.fs_root, abs_raw) orelse return;
+fn sendCwd(att: *Attachment, abs_raw: []const u8) !void {
+    const rel = relativeCwd(abs_raw) orelse return;
     var buf: [std.fs.max_path_bytes * 2 + 64]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     const Payload = struct {
@@ -626,7 +612,7 @@ fn refreshCwd(s: *Session, force: bool) void {
 
     const att = s.attachment orelse return;
     if (!att.alive.load(.acquire)) return;
-    sendCwd(s.manager, att, abs) catch {
+    sendCwd(att, abs) catch {
         att.alive.store(false, .release);
         att.stream.shutdown(s.manager.io, .both) catch {};
     };
@@ -768,19 +754,17 @@ pub fn parseOffset(value: ?[]const u8) u64 {
     return std.fmt.parseInt(u64, v, 10) catch 0;
 }
 
-test "cwd relative to file root" {
-    try std.testing.expectEqualStrings("srv/work", relativeCwd("/", "/srv/work").?);
-    try std.testing.expectEqualStrings("", relativeCwd("/", "/").?);
-    try std.testing.expectEqualStrings("", relativeCwd("/srv/work", "/srv/work").?);
-    try std.testing.expectEqualStrings("sub", relativeCwd("/srv/work", "/srv/work/sub").?);
-    try std.testing.expect(relativeCwd("/srv/work", "/srv/workshop") == null);
-    try std.testing.expect(relativeCwd("/srv/work", "/etc") == null);
+test "cwd relative to /" {
+    try std.testing.expectEqualStrings("srv/work", relativeCwd("/srv/work").?);
+    try std.testing.expectEqualStrings("srv/work", relativeCwd("/srv/work/").?);
+    try std.testing.expectEqualStrings("", relativeCwd("/").?);
+    try std.testing.expect(relativeCwd("srv/work") == null);
 }
 
 test "ring buffer replay offsets" {
     const io = std.testing.io;
     var cfg = config.Config{};
-    var m = Manager.init(io, std.testing.allocator, &cfg, "/");
+    var m = Manager.init(io, std.testing.allocator, &cfg);
     // 不启动真实 PTY：手工构造一个 Session 测环形逻辑。
     var buf: [16]u8 = undefined;
     var s: Session = .{
@@ -803,7 +787,7 @@ test "ring buffer replay offsets" {
 test "ring buffer keeps the newest bytes for arbitrary appends" {
     const io = std.testing.io;
     var cfg = config.Config{};
-    var m = Manager.init(io, std.testing.allocator, &cfg, "/");
+    var m = Manager.init(io, std.testing.allocator, &cfg);
 
     var storage: [37]u8 = undefined;
     var s: Session = .{

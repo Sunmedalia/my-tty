@@ -1,11 +1,10 @@
-//! 受限文件系统 API：列目录、读、写、建目录、重命名、删除。
+//! 文件系统 API：列目录、读、写、建目录、重命名、删除。
 //!
-//! 边界：所有路径参数都是相对 `root` 的 POSIX 路径。list/read/download/archive
-//! 先 `realPathFileAlloc` 再校验前缀；delete/rename 只解析父目录，操作符号链接
-//! 本身；新建目标先校验父目录。常规路径解析下符号链接无法把访问范围带出 root；
-//! 同一 uid 的并发替换（TOCTOU）不在 `--root` 的防护范围内。
+//! 所有路径参数都是相对 `/` 的 POSIX 路径：拒绝绝对路径和 `..` 是为了 API
+//! 语义明确，符号链接可以指向任意位置。delete/rename 只解析父目录，操作
+//! 符号链接本身而不是它指向的目标。
 //!
-//! 只处理文本：读取上限 1 MiB，含 NUL 视为二进制拒绝。
+//! 只处理文本：读取上限 1 MiB，含 NUL 或非 UTF-8 视为二进制拒绝。
 
 const std = @import("std");
 const http = std.http;
@@ -24,27 +23,9 @@ pub const max_list_entries: usize = 10_000;
 pub const max_tar_entries: usize = 50_000;
 pub const max_tar_bytes: u64 = 8 * 1024 * 1024 * 1024;
 
-/// 断点续传临时文件的保留时间；超过后由维护线程清理。
-pub const upload_temp_ttl_ns: i96 = 24 * std.time.ns_per_hour;
-
-/// 清理时要遍历的目录深度/条目上限，避免维护线程在大目录上跑太久。
-const sweep_max_depth: u32 = 16;
-const sweep_max_entries: usize = 50_000;
-
 /// 上传临时文件只对当前用户可读写；完成后再改回普通文件权限。
 const upload_temp_mode: std.posix.mode_t = 0o600;
 const upload_final_mode: std.posix.mode_t = 0o644;
-
-pub const Fs = struct {
-    /// 规范化后的绝对路径，不以 `/` 结尾（根目录 `/` 除外）。
-    root: []const u8,
-
-    pub fn init(io: Io, alloc: Allocator, root: []const u8) !Fs {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = try Dir.cwd().realPathFile(io, root, &buf);
-        return .{ .root = try alloc.dupe(u8, buf[0..n]) };
-    }
-};
 
 const Entry = struct {
     name: []const u8,
@@ -52,7 +33,7 @@ const Entry = struct {
     size: u64,
 };
 
-pub fn handle(io: Io, gpa: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+pub fn handle(io: Io, gpa: Allocator, request: *http.Server.Request) !void {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -62,43 +43,43 @@ pub fn handle(io: Io, gpa: Allocator, fs: *const Fs, request: *http.Server.Reque
 
     if (std.mem.eql(u8, path, "/api/fs/list")) {
         if (request.head.method != .GET) return fail(request, arena, .method_not_allowed, "method_not_allowed");
-        return list(io, arena, fs, request);
+        return list(io, arena, request);
     }
     if (std.mem.eql(u8, path, "/api/fs/read")) {
         if (request.head.method != .GET) return fail(request, arena, .method_not_allowed, "method_not_allowed");
-        return read(io, arena, fs, request);
+        return read(io, arena, request);
     }
     if (std.mem.eql(u8, path, "/api/fs/write")) {
         if (request.head.method != .PUT) return fail(request, arena, .method_not_allowed, "method_not_allowed");
-        return write(io, gpa, arena, fs, request);
+        return write(io, gpa, arena, request);
     }
     if (std.mem.eql(u8, path, "/api/fs/mkdir")) {
         if (request.head.method != .POST) return fail(request, arena, .method_not_allowed, "method_not_allowed");
-        return makeDir(io, arena, fs, request);
+        return makeDir(io, arena, request);
     }
     if (std.mem.eql(u8, path, "/api/fs/rename")) {
         if (request.head.method != .POST) return fail(request, arena, .method_not_allowed, "method_not_allowed");
-        return rename(io, arena, fs, request);
+        return rename(io, arena, request);
     }
     if (std.mem.eql(u8, path, "/api/fs/delete")) {
         if (request.head.method != .DELETE) return fail(request, arena, .method_not_allowed, "method_not_allowed");
-        return delete(io, arena, fs, request);
+        return delete(io, arena, request);
     }
     if (std.mem.eql(u8, path, "/api/fs/upload")) {
         return switch (request.head.method) {
-            .PUT => upload(io, arena, fs, request),
-            .GET => uploadStatus(io, arena, fs, request),
-            .DELETE => uploadCancel(io, arena, fs, request),
+            .PUT => upload(io, arena, request),
+            .GET => uploadStatus(io, arena, request),
+            .DELETE => uploadCancel(io, arena, request),
             else => fail(request, arena, .method_not_allowed, "method_not_allowed"),
         };
     }
     if (std.mem.eql(u8, path, "/api/fs/archive")) {
         if (request.head.method != .GET) return fail(request, arena, .method_not_allowed, "method_not_allowed");
-        return archive(io, arena, fs, request);
+        return archive(io, arena, request);
     }
     if (std.mem.eql(u8, path, "/api/fs/download")) {
         if (request.head.method != .GET) return fail(request, arena, .method_not_allowed, "method_not_allowed");
-        return download(io, arena, fs, request);
+        return download(io, arena, request);
     }
     return fail(request, arena, .not_found, "not_found");
 }
@@ -109,10 +90,10 @@ fn param(arena: Allocator, request: *http.Server.Request, key: []const u8) []con
     return (util.queryParamDecoded(arena, request.head.target, key) catch null) orelse "";
 }
 
-fn list(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn list(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
-    const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = resolveExisting(io, arena, rel) catch |err| return failMapped(request, arena, err);
 
     var dir = Dir.cwd().openDir(io, abs, .{ .iterate = true, .follow_symlinks = false }) catch |err|
         return failMapped(request, arena, err);
@@ -155,11 +136,11 @@ fn list(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) 
     });
 }
 
-fn read(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn read(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
-    const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = resolveExisting(io, arena, rel) catch |err| return failMapped(request, arena, err);
 
     const st = Dir.cwd().statFile(io, abs, .{ .follow_symlinks = false }) catch |err|
         return failMapped(request, arena, err);
@@ -179,7 +160,7 @@ fn read(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) 
     return respondJson(request, arena, .ok, Payload{ .path = rel, .content = bytes, .size = st.size });
 }
 
-fn write(io: Io, gpa: Allocator, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn write(io: Io, gpa: Allocator, arena: Allocator, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
@@ -198,7 +179,7 @@ fn write(io: Io, gpa: Allocator, arena: Allocator, fs: *const Fs, request: *http
     // 客户端可能在 Content-Length 之前就断开；不能把半截内容写进目标文件。
     if (!bodyComplete(request)) return failClose(request, arena, .bad_request, "bad_body");
 
-    const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = resolveNew(io, arena, rel) catch |err| return failMapped(request, arena, err);
 
     const perms = existingFilePermissions(io, abs) orelse .default_file;
     var atomic = Dir.cwd().createFileAtomic(io, abs, .{
@@ -213,39 +194,39 @@ fn write(io: Io, gpa: Allocator, arena: Allocator, fs: *const Fs, request: *http
     return respondJson(request, arena, .ok, Payload{ .ok = true, .path = rel, .size = body.len });
 }
 
-fn makeDir(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn makeDir(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
-    const abs = resolveCreatePath(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = joinAbs(arena, "/", rel) catch |err| return failMapped(request, arena, err);
 
     Dir.cwd().createDirPath(io, abs) catch |err| return failMapped(request, arena, err);
     const Payload = struct { ok: bool };
     return respondJson(request, arena, .ok, Payload{ .ok = true });
 }
 
-fn rename(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn rename(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const from_rel = normalized(arena, param(arena, request, "from")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     const to_rel = normalized(arena, param(arena, request, "to")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (from_rel.len == 0 or to_rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
 
-    const from_abs = resolveLeaf(io, arena, fs, from_rel) catch |err| return failMapped(request, arena, err);
-    const to_abs = resolveNew(io, arena, fs, to_rel) catch |err| return failMapped(request, arena, err);
-    if (std.mem.eql(u8, from_abs, fs.root)) return fail(request, arena, .forbidden, "cannot_move_root");
+    const from_abs = resolveLeaf(io, arena, from_rel) catch |err| return failMapped(request, arena, err);
+    const to_abs = resolveNew(io, arena, to_rel) catch |err| return failMapped(request, arena, err);
+    if (std.mem.eql(u8, from_abs, "/")) return fail(request, arena, .forbidden, "cannot_move_root");
 
     Dir.rename(.cwd(), from_abs, .cwd(), to_abs, io) catch |err| return failMapped(request, arena, err);
     const Payload = struct { ok: bool };
     return respondJson(request, arena, .ok, Payload{ .ok = true });
 }
 
-fn delete(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn delete(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
-    const abs = resolveLeaf(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
-    if (std.mem.eql(u8, abs, fs.root)) return fail(request, arena, .forbidden, "cannot_delete_root");
+    const abs = resolveLeaf(io, arena, rel) catch |err| return failMapped(request, arena, err);
+    if (std.mem.eql(u8, abs, "/")) return fail(request, arena, .forbidden, "cannot_delete_root");
 
     const st = Dir.cwd().statFile(io, abs, .{ .follow_symlinks = false }) catch |err|
         return failMapped(request, arena, err);
@@ -258,7 +239,7 @@ fn delete(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
     return respondJson(request, arena, .ok, Payload{ .ok = true });
 }
 
-fn upload(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn upload(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
@@ -267,17 +248,17 @@ fn upload(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request
     if (raw_id.len != 0) {
         const valid = validUploadId(raw_id) orelse
             return fail(request, arena, .bad_request, "invalid_id");
-        return uploadChunk(io, arena, fs, rel, valid, request);
+        return uploadChunk(io, arena, rel, valid, request);
     }
-    return uploadSingle(io, arena, fs, rel, request);
+    return uploadSingle(io, arena, rel, request);
 }
 
-fn uploadSingle(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, request: *http.Server.Request) !void {
+fn uploadSingle(io: Io, arena: Allocator, rel: []const u8, request: *http.Server.Request) !void {
     if (request.head.content_length) |len| {
         if (len > max_upload) return failClose(request, arena, .payload_too_large, "upload_too_large");
     }
 
-    const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = resolveNew(io, arena, rel) catch |err| return failMapped(request, arena, err);
 
     const perms = existingFilePermissions(io, abs) orelse .default_file;
     var atomic = Dir.cwd().createFileAtomic(io, abs, .{
@@ -308,7 +289,7 @@ fn uploadSingle(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, reques
     return respondJson(request, arena, .ok, Payload{ .ok = true, .done = true, .path = rel, .offset = total });
 }
 
-fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []const u8, request: *http.Server.Request) !void {
+fn uploadChunk(io: Io, arena: Allocator, rel: []const u8, id: []const u8, request: *http.Server.Request) !void {
     const offset = parseU64(param(arena, request, "offset")) orelse
         return fail(request, arena, .bad_request, "invalid_offset");
     const total = parseU64(param(arena, request, "total")) orelse
@@ -316,7 +297,7 @@ fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []c
     if (total == 0 or total > max_upload) return failClose(request, arena, .payload_too_large, "upload_too_large");
     if (offset > total) return failClose(request, arena, .bad_request, "invalid_offset");
 
-    const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = resolveNew(io, arena, rel) catch |err| return failMapped(request, arena, err);
     const temp = uploadTempPath(arena, abs, id) catch
         return fail(request, arena, .internal_server_error, "out_of_memory");
 
@@ -390,14 +371,14 @@ fn uploadChunk(io: Io, arena: Allocator, fs: *const Fs, rel: []const u8, id: []c
     return respondJson(request, arena, .ok, Payload{ .ok = true, .done = true, .path = rel, .offset = total });
 }
 
-fn uploadStatus(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn uploadStatus(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
     const raw_id = param(arena, request, "id");
     if (raw_id.len == 0) return fail(request, arena, .bad_request, "invalid_id");
     const id = validUploadId(raw_id) orelse return fail(request, arena, .bad_request, "invalid_id");
-    const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = resolveNew(io, arena, rel) catch |err| return failMapped(request, arena, err);
     const temp = uploadTempPath(arena, abs, id) catch
         return fail(request, arena, .internal_server_error, "out_of_memory");
 
@@ -409,14 +390,14 @@ fn uploadStatus(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.R
     return respondJson(request, arena, .ok, Payload{ .offset = if (st) |x| x.size else 0 });
 }
 
-fn uploadCancel(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn uploadCancel(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
     const raw_id = param(arena, request, "id");
     if (raw_id.len == 0) return fail(request, arena, .bad_request, "invalid_id");
     const id = validUploadId(raw_id) orelse return fail(request, arena, .bad_request, "invalid_id");
-    const abs = resolveNew(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = resolveNew(io, arena, rel) catch |err| return failMapped(request, arena, err);
     const temp = uploadTempPath(arena, abs, id) catch
         return fail(request, arena, .internal_server_error, "out_of_memory");
 
@@ -439,61 +420,6 @@ fn uploadTempPath(alloc: Allocator, target_abs: []const u8, id: []const u8) ![]c
     return std.fmt.allocPrint(alloc, "{s}/.myty-upload-{s}", .{ target_abs[0..slash], id });
 }
 
-/// `.myty-upload-<8..32 hex>`，与上传时生成的临时文件名一致。
-fn isUploadTempName(name: []const u8) bool {
-    const prefix = ".myty-upload-";
-    if (!std.mem.startsWith(u8, name, prefix)) return false;
-    return validUploadId(name[prefix.len..]) != null;
-}
-
-/// 清理超过 `ttl_ns` 没有更新的断点续传临时文件。
-///
-/// 只删除 root 内、名字严格匹配 `.myty-upload-<8..32 hex>` 的普通文件；
-/// 不跟随符号链接，深度和条目数都有上限，避免维护线程在超大目录上跑太久。
-pub fn sweepUploadTemps(io: Io, alloc: Allocator, fs: *const Fs, ttl_ns: i96) void {
-    const cutoff = Io.Clock.real.now(io).nanoseconds - ttl_ns;
-    var budget: usize = sweep_max_entries;
-    const root = alloc.dupe(u8, fs.root) catch return;
-    defer alloc.free(root);
-    sweepTempsIn(io, alloc, root, 0, cutoff, &budget);
-}
-
-fn sweepTempsIn(
-    io: Io,
-    alloc: Allocator,
-    dir_abs: []const u8,
-    depth: u32,
-    cutoff: i96,
-    budget: *usize,
-) void {
-    if (depth > sweep_max_depth) return;
-
-    var dir = Dir.cwd().openDir(io, dir_abs, .{ .iterate = true, .follow_symlinks = false }) catch return;
-    defer dir.close(io);
-
-    var it = dir.iterate();
-    while (true) {
-        if (budget.* == 0) return;
-        const entry = it.next(io) catch return orelse return;
-        budget.* -= 1;
-
-        if (isUploadTempName(entry.name)) {
-            const st = dir.statFile(io, entry.name, .{ .follow_symlinks = false }) catch continue;
-            if (st.kind != .file) continue;
-            if (st.mtime.nanoseconds > cutoff) continue;
-            const path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_abs, entry.name }) catch continue;
-            defer alloc.free(path);
-            Dir.cwd().deleteFile(io, path) catch {};
-            continue;
-        }
-
-        if (entry.kind != .directory) continue;
-        const child = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_abs, entry.name }) catch continue;
-        defer alloc.free(child);
-        sweepTempsIn(io, alloc, child, depth + 1, cutoff, budget);
-    }
-}
-
 fn parseU64(text: []const u8) ?u64 {
     return std.fmt.parseInt(u64, text, 10) catch null;
 }
@@ -503,10 +429,10 @@ fn failOffset(request: *http.Server.Request, alloc: Allocator, status: http.Stat
     return respondJson(request, alloc, status, Payload{ .@"error" = code, .offset = offset });
 }
 
-fn archive(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn archive(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
-    const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = resolveExisting(io, arena, rel) catch |err| return failMapped(request, arena, err);
     const st = Dir.cwd().statFile(io, abs, .{ .follow_symlinks = false }) catch |err|
         return failMapped(request, arena, err);
     if (st.kind != .directory) return fail(request, arena, .bad_request, "not_a_directory");
@@ -619,12 +545,12 @@ fn walkTar(
     }
 }
 
-fn download(io: Io, arena: Allocator, fs: *const Fs, request: *http.Server.Request) !void {
+fn download(io: Io, arena: Allocator, request: *http.Server.Request) !void {
     const rel = normalized(arena, param(arena, request, "path")) catch
         return fail(request, arena, .bad_request, "invalid_path");
     if (rel.len == 0) return fail(request, arena, .bad_request, "invalid_path");
 
-    const abs = resolveExisting(io, arena, fs, rel) catch |err| return failMapped(request, arena, err);
+    const abs = resolveExisting(io, arena, rel) catch |err| return failMapped(request, arena, err);
     const st = Dir.cwd().statFile(io, abs, .{ .follow_symlinks = false }) catch |err|
         return failMapped(request, arena, err);
     if (st.kind != .file) return fail(request, arena, .bad_request, "not_a_file");
@@ -695,7 +621,6 @@ fn contentDisposition(buf: []u8, name: []const u8) []const u8 {
 
 const PathError = error{
     InvalidPath,
-    OutsideRoot,
     FileNotFound,
     AccessDenied,
     OutOfMemory,
@@ -733,77 +658,45 @@ fn existingFilePermissions(io: Io, abs: []const u8) ?std.Io.File.Permissions {
     return null;
 }
 
-fn resolveExisting(io: Io, alloc: Allocator, fs: *const Fs, rel: []const u8) PathError![:0]u8 {
-    const joined = joinAbs(alloc, fs.root, rel) catch return error.OutOfMemory;
-    const abs = Dir.cwd().realPathFileAlloc(io, joined, alloc) catch |err| return switch (err) {
+/// 解析已存在的目标；realpath 用于消除符号链接，便于后续按文件/目录处理。
+fn resolveExisting(io: Io, alloc: Allocator, rel: []const u8) PathError![:0]u8 {
+    const joined = joinAbs(alloc, "/", rel) catch return error.OutOfMemory;
+    return Dir.cwd().realPathFileAlloc(io, joined, alloc) catch |err| switch (err) {
         error.FileNotFound => error.FileNotFound,
         error.AccessDenied => error.AccessDenied,
         error.OutOfMemory => error.OutOfMemory,
         else => error.IoError,
     };
-    if (!inside(fs.root, abs)) return error.OutsideRoot;
-    return abs;
 }
 
-/// 目标可以不存在，但父目录必须存在且在 root 内。
-fn resolveNew(io: Io, alloc: Allocator, fs: *const Fs, rel: []const u8) PathError![]const u8 {
+/// 目标可以不存在，但父目录必须存在。
+fn resolveNew(io: Io, alloc: Allocator, rel: []const u8) PathError![]const u8 {
     const slash = std.mem.lastIndexOfScalar(u8, rel, '/') orelse {
-        const parent = try resolveExisting(io, alloc, fs, "");
+        const parent = try resolveExisting(io, alloc, "");
         return joinAbs(alloc, parent, rel);
     };
     const parent_rel = rel[0..slash];
     const base = rel[slash + 1 ..];
     if (base.len == 0 or std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, ".."))
         return error.InvalidPath;
-    const parent = try resolveExisting(io, alloc, fs, parent_rel);
+    const parent = try resolveExisting(io, alloc, parent_rel);
     return joinAbs(alloc, parent, base);
 }
 
 /// 只规范化父目录，不解析最后一段。delete/rename 用它来操作符号链接本身，
 /// 而不是把链接解析到目标，避免“删除一个链接却删掉整个目标目录”。
-fn resolveLeaf(io: Io, alloc: Allocator, fs: *const Fs, rel: []const u8) PathError![]const u8 {
+fn resolveLeaf(io: Io, alloc: Allocator, rel: []const u8) PathError![]const u8 {
     if (rel.len == 0) return error.InvalidPath;
     const slash = std.mem.lastIndexOfScalar(u8, rel, '/') orelse {
-        const parent = try resolveExisting(io, alloc, fs, "");
+        const parent = try resolveExisting(io, alloc, "");
         return joinAbs(alloc, parent, rel);
     };
     const parent_rel = rel[0..slash];
     const base = rel[slash + 1 ..];
     if (base.len == 0 or std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, ".."))
         return error.InvalidPath;
-    const parent = try resolveExisting(io, alloc, fs, parent_rel);
+    const parent = try resolveExisting(io, alloc, parent_rel);
     return joinAbs(alloc, parent, base);
-}
-
-/// 递归创建用：找到最深的已存在祖先，校验它在 root 内，再拼上待创建的部分。
-fn resolveCreatePath(io: Io, alloc: Allocator, fs: *const Fs, rel: []const u8) PathError![]const u8 {
-    var prefix = rel;
-    while (true) {
-        const joined = joinAbs(alloc, fs.root, prefix) catch return error.OutOfMemory;
-        const abs = Dir.cwd().realPathFileAlloc(io, joined, alloc) catch |err| switch (err) {
-            error.FileNotFound => {
-                if (prefix.len == 0) return error.FileNotFound;
-                const slash = std.mem.lastIndexOfScalar(u8, prefix, '/') orelse 0;
-                const next = if (slash == 0) "" else prefix[0..slash];
-                if (next.len == prefix.len) return error.FileNotFound;
-                prefix = next;
-                continue;
-            },
-            else => return error.IoError,
-        };
-        if (!inside(fs.root, abs)) return error.OutsideRoot;
-        if (prefix.len == 0) return joinAbs(alloc, abs, rel);
-        if (prefix.len == rel.len) return alloc.dupe(u8, abs);
-        return std.fmt.allocPrint(alloc, "{s}/{s}", .{ abs, rel[prefix.len + 1 ..] }) catch
-            return error.OutOfMemory;
-    }
-}
-
-pub fn inside(root: []const u8, abs: []const u8) bool {
-    if (std.mem.eql(u8, root, "/")) return abs.len != 0 and abs[0] == '/';
-    if (!std.mem.startsWith(u8, abs, root)) return false;
-    if (abs.len == root.len) return true;
-    return abs[root.len] == '/';
 }
 
 fn entryLessThan(_: void, a: Entry, b: Entry) bool {
@@ -889,7 +782,6 @@ fn failClose(request: *http.Server.Request, alloc: Allocator, status: http.Statu
 fn failMapped(request: *http.Server.Request, alloc: Allocator, err: anyerror) anyerror!void {
     return switch (err) {
         error.InvalidPath => fail(request, alloc, .bad_request, "invalid_path"),
-        error.OutsideRoot => fail(request, alloc, .forbidden, "outside_root"),
         error.FileNotFound => fail(request, alloc, .not_found, "not_found"),
         error.PathAlreadyExists => fail(request, alloc, .conflict, "already_exists"),
         error.NotDir => fail(request, alloc, .conflict, "not_a_directory"),
@@ -931,13 +823,6 @@ test "upload id validation" {
     try std.testing.expect(validUploadId("0123456789abcdef0123456789abcdef0") == null);
 }
 
-test "upload temp name matching" {
-    try std.testing.expect(isUploadTempName(".myty-upload-abcdef0123456789"));
-    try std.testing.expect(!isUploadTempName(".myty-upload-abc"));
-    try std.testing.expect(!isUploadTempName(".myty-upload-zzzzzzzz"));
-    try std.testing.expect(!isUploadTempName("myty-upload-abcdef0123456789"));
-}
-
 test "upload temp path stays beside the target" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -951,27 +836,4 @@ test "upload temp path stays beside the target" {
 test "basename" {
     try std.testing.expectEqualStrings("b.txt", basename("a/b.txt"));
     try std.testing.expectEqualStrings("a.txt", basename("a.txt"));
-}
-
-test "inside boundary" {
-    try std.testing.expect(inside("/srv/root", "/srv/root/a"));
-    try std.testing.expect(inside("/srv/root", "/srv/root"));
-    try std.testing.expect(!inside("/srv/root", "/srv/root2/a"));
-    try std.testing.expect(!inside("/srv/root", "/srv"));
-    try std.testing.expect(inside("/", "/anything"));
-}
-
-test "resolveCreatePath handles an already existing target" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const a = arena_state.allocator();
-    const io = std.testing.io;
-
-    // `/proc` 在 Linux 上一定存在；以前这里会对 prefix.len + 1 越界 panic。
-    var fs: Fs = .{ .root = "/" };
-    try std.testing.expectEqualStrings("/proc", try resolveCreatePath(io, a, &fs, "proc"));
-    try std.testing.expectEqualStrings(
-        "/proc/sys",
-        try resolveCreatePath(io, a, &fs, "proc/sys"),
-    );
 }

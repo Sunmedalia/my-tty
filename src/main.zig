@@ -27,15 +27,9 @@ pub fn main(init: std.process.Init) !void {
     };
 
     if (argsContain(args, "--check-config")) {
-        const fs = @import("fsapi.zig").Fs.init(init.io, init.gpa, cfg.root) catch |err| {
-            std.debug.print("配置检查失败: 无法打开 root={s}（{t}）\n", .{ cfg.root, err });
-            std.process.exit(1);
-        };
-        std.debug.print("配置检查通过: host={s} port={d} root={s} sessions={d}d/{d}h conns={d} pty_idle={d}m\n", .{
-            cfg.host,             cfg.port, fs.root, cfg.session_ttl_days, cfg.session_idle_hours, cfg.max_connections,
-            cfg.pty_idle_minutes,
+        std.debug.print("配置检查通过: host={s} port={d} sessions={d}d/{d}h conns={d} pty_idle={d}m\n", .{
+            cfg.host, cfg.port, cfg.session_ttl_days, cfg.session_idle_hours, cfg.max_connections, cfg.pty_idle_minutes,
         });
-        init.gpa.free(fs.root);
         return;
     }
 

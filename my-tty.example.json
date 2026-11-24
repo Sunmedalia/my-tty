@@ -6,7 +6,6 @@
   "session_ttl_days": 7,
   "session_idle_hours": 24,
   "max_connections": 64,
-  "root": "/",
   "max_sessions": 16,
   "pty_idle_minutes": 30
 }

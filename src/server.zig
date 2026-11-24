@@ -174,14 +174,8 @@ fn installSignalHandlers() void {
 }
 
 pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
-    const fs = fsapi.Fs.init(io, gpa, cfg.root) catch |err| {
-        std.debug.print("无法打开 root={s}: {t}\n", .{ cfg.root, err });
-        return err;
-    };
-    defer gpa.free(fs.root);
-
     var auth_state = auth.Auth.init(io, cfg.password orelse unreachable, cfg.session_ttl_days, cfg.session_idle_hours);
-    var manager = session.Manager.init(io, gpa, cfg, fs.root);
+    var manager = session.Manager.init(io, gpa, cfg);
     defer manager.deinit();
 
     const addr = try net.IpAddress.parseIp4(cfg.host, cfg.port);
@@ -192,13 +186,12 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
 
     installSignalHandlers();
 
-    const maint = std.Thread.spawn(.{}, maintenance, .{ io, gpa, &fs, &auth_state, &manager }) catch null;
+    const maint = std.Thread.spawn(.{}, maintenance, .{ io, &auth_state, &manager }) catch null;
 
-    std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  root={s}  会话={d}天/{d}h  连接≤{d}  保持={d}分钟\n", .{
+    std.debug.print("my-tty 监听 http://{s}:{d}  shell={s}  会话={d}天/{d}h  连接≤{d}  保持={d}分钟\n", .{
         cfg.host,
         cfg.port,
         cfg.shell,
-        fs.root,
         cfg.session_ttl_days,
         cfg.session_idle_hours,
         cfg.max_connections,
@@ -226,7 +219,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
 
         connAdd(io, stream.socket.handle);
         const thread = std.Thread.spawn(.{}, connectionMain, .{
-            io, gpa, stream, cfg, &fs, &auth_state, &manager,
+            io, gpa, stream, cfg, &auth_state, &manager,
         }) catch {
             connRemove(io, stream.socket.handle);
             _ = active_connections.fetchSub(1, .acq_rel);
@@ -243,7 +236,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     if (maint) |t| t.join();
 
     std.debug.print("正在退出：回收 shell…\n", .{});
-    // fs/auth_state/manager 都在本函数的栈上，绝不能在线程还在使用时返回。
+    // auth_state/manager 都在本函数的栈上，绝不能在线程还在使用时返回。
     var waited: u32 = 0;
     while (active_connections.load(.acquire) > 0 and waited < 500) : (waited += 1) {
         Io.sleep(io, Io.Duration.fromMilliseconds(10), .real) catch break;
@@ -260,13 +253,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     std.debug.print("已退出\n", .{});
 }
 
-/// 断点续传临时文件的清理间隔（秒）。
-const upload_sweep_ticks: u32 = 6 * 60 * 60;
-
-fn maintenance(io: Io, gpa: Allocator, fs: *const fsapi.Fs, auth_state: *auth.Auth, manager: *session.Manager) void {
-    // 启动时先清一次上次进程留下的半截上传。
-    fsapi.sweepUploadTemps(io, gpa, fs, fsapi.upload_temp_ttl_ns);
-
+fn maintenance(io: Io, auth_state: *auth.Auth, manager: *session.Manager) void {
     var ticks: u32 = 0;
     // 1 秒一跳，便于 SIGTERM 时尽快 join；每 60 跳做一次清理。
     while (!shutting_down.load(.acquire)) {
@@ -278,9 +265,6 @@ fn maintenance(io: Io, gpa: Allocator, fs: *const fsapi.Fs, auth_state: *auth.Au
         // 登录会话/票据的清理保持每分钟一次即可。
         manager.sweep();
         if (ticks % 60 == 0) auth_state.sweep();
-        if (ticks % upload_sweep_ticks == 0) {
-            fsapi.sweepUploadTemps(io, gpa, fs, fsapi.upload_temp_ttl_ns);
-        }
     }
 }
 
@@ -289,7 +273,6 @@ fn connectionMain(
     gpa: Allocator,
     stream: net.Stream,
     cfg: *const config.Config,
-    fs: *const fsapi.Fs,
     auth_state: *auth.Auth,
     manager: *session.Manager,
 ) void {
@@ -339,7 +322,7 @@ fn connectionMain(
                 return;
             },
             .none => {
-                handleHttp(io, gpa, cfg, fs, auth_state, peer, stream.socket.handle, &request) catch return;
+                handleHttp(io, gpa, cfg, auth_state, peer, stream.socket.handle, &request) catch return;
                 // 客户端要求关闭，或请求 body 没有干净读完时，绝不能在同一个连接上
                 // 继续解析下一段字节：残余 body 会被当成新请求（请求走私/响应错位）。
                 if (!request.head.keep_alive) return;
@@ -356,7 +339,6 @@ fn handleHttp(
     io: Io,
     gpa: Allocator,
     cfg: *const config.Config,
-    fs: *const fsapi.Fs,
     auth_state: *auth.Auth,
     peer: net.IpAddress,
     fd: posix.fd_t,
@@ -397,7 +379,7 @@ fn handleHttp(
         if (std.mem.eql(u8, path, "/api/auth/logout")) return handleLogout(auth_state, trust_forwarded, request);
         if (std.mem.eql(u8, path, "/api/auth/status")) return handleStatus(auth_state, request);
         if (std.mem.eql(u8, path, "/api/auth/ticket")) return handleTicket(auth_state, request);
-        if (std.mem.startsWith(u8, path, "/api/fs/")) return fsapi.handle(io, gpa, fs, request);
+        if (std.mem.startsWith(u8, path, "/api/fs/")) return fsapi.handle(io, gpa, request);
         return respond(request, "{\"error\":\"not_found\"}\n", .not_found);
     }
 

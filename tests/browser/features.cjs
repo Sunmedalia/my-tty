@@ -8,6 +8,7 @@ const PASSWORD = process.env.PASSWORD;
 const ROOT = process.env.ROOT;
 const CHROME = process.env.CHROME || undefined;
 const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
+const ROOT_NAME = path.basename(ROOT);
 
 (async () => {
   fs.writeFileSync(path.join(ROOT, "lines.txt"), "one\ntwo\nthree\n");
@@ -151,7 +152,15 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   assert(Math.abs(r1 - 0.7) < 0.02 && Math.abs(r2 - 0.3) < 0.02, "horizontal splitter moved: " + rows);
 
   await page.click("#toggle-files");
-  await page.waitForSelector("#file-list .entry.file");
+  await page.waitForFunction(
+    (name) => {
+      const el = document.querySelector("#crumb button.active");
+      return !!el && el.textContent === name;
+    },
+    ROOT_NAME,
+    { timeout: 10000 }
+  );
+  await page.locator("#file-list .entry.file", { hasText: "lines.txt" }).waitFor();
   await page.locator("#file-list .entry.file", { hasText: "lines.txt" }).locator(".name").click();
   await page.waitForSelector("#editor-overlay:not([hidden])");
   assert((await page.textContent("#editor-gutter")).trim().split("\n").length === 3, "gutter lines");

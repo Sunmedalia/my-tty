@@ -9,6 +9,7 @@ const PASSWORD = process.env.PASSWORD;
 const ROOT = process.env.ROOT;
 const CHROME = process.env.CHROME || undefined;
 const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
+const ROOT_NAME = path.basename(ROOT);
 
 (async () => {
   const src = path.join(os.tmpdir(), "my-tty-upload-src.bin");
@@ -29,6 +30,15 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.waitForSelector(".pane .xterm");
   await page.click("#toggle-files");
   await page.waitForSelector("#file-list");
+  // 文件面板从 / 开始；终端在 HOME(=ROOT) 里，cwd 同步后停在测试目录。
+  await page.waitForFunction(
+    (name) => {
+      const el = document.querySelector("#crumb button.active");
+      return !!el && el.textContent === name;
+    },
+    ROOT_NAME,
+    { timeout: 10000 }
+  );
 
   // 文件工具栏的图标按钮是等宽高方形，避免不同符号宽度造成偏心。
   const iconSizes = await page.evaluate(() =>

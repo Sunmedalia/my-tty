@@ -28,10 +28,10 @@ zig test src/tests.zig
 
 不传 `--password` 时会随机生成一个，并打印到终端；重启会更换。
 
-指定 shell 与工作根目录：
+指定 shell：
 
 ```sh
-./zig-out/bin/my-tty --shell /bin/zsh --root /srv/work --password 'change-me'
+./zig-out/bin/my-tty --shell /bin/zsh --password 'change-me'
 ```
 
 ## 配置
@@ -48,7 +48,6 @@ zig test src/tests.zig
   "session_ttl_days": 7,
   "session_idle_hours": 24,
   "max_connections": 64,
-  "root": "/",
   "max_sessions": 16,
   "pty_idle_minutes": 30
 }
@@ -56,10 +55,9 @@ zig test src/tests.zig
 
 环境变量：`MYTTY_CONFIG`、`MYTTY_HOST`、`MYTTY_PORT`、`MYTTY_SHELL`、
 `MYTTY_PASSWORD`、`MYTTY_SESSION_TTL_DAYS`、`MYTTY_SESSION_IDLE_HOURS`、
-`MYTTY_MAX_CONNECTIONS`、`MYTTY_ROOT`、`MYTTY_MAX_SESSIONS`、
-`MYTTY_PTY_IDLE_MINUTES`。
+`MYTTY_MAX_CONNECTIONS`、`MYTTY_MAX_SESSIONS`、`MYTTY_PTY_IDLE_MINUTES`。
 完整参数见 `my-tty --help`；仓库里有一份 `my-tty.example.json`。
-`my-tty --check-config` 只校验配置与 root，不启动服务。
+`my-tty --check-config` 只校验配置，不启动服务。
 
 ## 作为 systemd 服务
 
@@ -71,7 +69,7 @@ sudo install -Dm755 zig-out/bin/my-tty /usr/local/bin/my-tty
 sudo useradd --system --create-home --home-dir /srv/work --shell /bin/bash my-tty
 sudo install -d -o root -g my-tty -m 750 /etc/my-tty
 sudo install -m640 -o root -g my-tty my-tty.example.json /etc/my-tty/my-tty.json
-sudoedit /etc/my-tty/my-tty.json        # 至少改 password / root / shell
+sudoedit /etc/my-tty/my-tty.json        # 至少改 password / shell
 sudo install -Dm644 deploy/my-tty.service /etc/systemd/system/my-tty.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now my-tty
@@ -80,8 +78,8 @@ journalctl -u my-tty -f
 
 - 密码放在 `/etc/my-tty/my-tty.json`（`0640 root:my-tty`），不要写进 `ExecStart`，
   否则会出现在 `ps` 和 journal 里。
-- 服务以专用用户 `my-tty` 运行，家目录是 `/srv/work`；终端和文件面板都以它为边界。
-- 启动前会先执行 `--check-config`，配置/root 有问题时直接失败，不会带着坏配置跑。
+- 服务以专用用户 `my-tty` 运行，家目录是 `/srv/work`；终端里能做的事都以该用户权限为准。
+- 启动前会先执行 `--check-config`，配置有问题时直接失败，不会带着坏配置跑。
 - 默认只监听 `127.0.0.1`；需要远程访问用 SSH 端口转发或外部反向代理，TLS 不在本项目里。
 - 停止时 `KillMode=mixed` 只给主进程发 SIGTERM，由程序自己回收所有 PTY。
 
@@ -99,12 +97,11 @@ journalctl -u my-tty -f
 
 ## 文件管理与编辑
 
-左侧“文件”面板默认访问整个文件系统；设置 `--root <dir>` 可以把它收窄到某个
-目录（主要是防误操作，不是针对已登录用户的安全边界）。面板宽度可以拖拽调整，
+左侧“文件”面板从 `/` 开始，可以浏览整个文件系统。面板宽度可以拖拽调整，
 双击分隔条恢复默认宽度，设置会记在浏览器里。目录以树状显示，点目录名
 选中并展开，点前面的三角形折叠/展开；新建、上传默认落在当前选中的目录，
 顶部面包屑可以直接跳到某一层。终端里 `cd` 或执行 `pwd` 后，文件面板会自动跳到
-shell 当前所在目录；只有位于 root 内的目录才会同步，root 外的 cwd 会被忽略。
+shell 当前所在目录。
 刷新按钮旁的目录跟随开关默认开启，关闭后终端 cwd 不再移动文件树，重新开启会
 立即对齐到 shell 当前目录；开关状态记在浏览器里。
 支持新建文件/目录、重命名、递归删除、上传/下载，
@@ -112,12 +109,11 @@ shell 当前所在目录；只有位于 root 内的目录才会同步，root 外
 弹窗输入名称，不调用浏览器原生 `prompt`。
 上传可以点 ⇪、拖进面板，或拖到某个目录行；文件按 4 MiB 分片，带进度条和取消，
 网络中断时会向服务端查询已写入偏移继续传；单个文件上限 64 MiB。
-半截的上传文件权限为 `0600`，完成并改名为正式文件后恢复为 `0644`；
-超过 24 小时没有更新的临时文件会在启动时和每 6 小时自动清理。
+半截的上传文件权限为 `0600`，完成并改名为正式文件后恢复为 `0644`。
 下载流式响应、带 `Content-Disposition: attachment`；目录可以下载成 `.tar`。
 单次列目录最多返回 1 万条（前端提示已截断）；目录归档最多 5 万条/8 GiB，
 超出时会停止追加并写入 `MY-TTY-TRUNCATED.txt`，不会生成损坏的 tar。
-路径参数一律相对 root，服务端用 realpath 前缀校验，`..` 和符号链接都无法越界。
+路径参数一律相对 `/`，会拒绝绝对路径和 `..`；符号链接不做限制。
 HTTP API：`GET /api/fs/list|read|download`、`PUT /api/fs/write|upload`、
 `POST /api/fs/mkdir|rename`、`DELETE /api/fs/delete`。
 
@@ -186,10 +182,6 @@ pane 标题栏改为固定在终端上方（不再悬浮遮挡内容）。
 - 静态资源/未知路径不接受请求体；未登录的 API 请求不会为了 keep-alive 去读取
   可能永远发不完的 body。
 - `SIGTERM`/`SIGINT` 会停止 accept、回收所有 PTY 后退出。
-- 文件管理/编辑只访问 `root` 下的真实路径；默认 `root=/`，需要收窄时用 `--root`。
-  这只是防误操作和收敛路径 bug，不构成对已登录终端用户的安全边界。
-  同一 uid 的进程仍可在 realpath 校验与实际 open 之间替换符号链接（TOCTOU），
-  所以不要把 `--root` 当成隔离手段。
 - 会话数受 `max_sessions` 限制；分屏上限 4。
 
 TLS 不属于本项目：请让进程只监听回环地址，把明文 HTTP/WS 交给外部反向代理。

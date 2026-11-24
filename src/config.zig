@@ -28,9 +28,6 @@ pub const Config = struct {
     max_sessions: u32 = 16,
     /// 前端断开后 shell 的保留时间（分钟）；0 表示断开即回收。
     pty_idle_minutes: u32 = 30,
-    /// 文件管理/编辑的可访问根目录；默认整个文件系统。
-    /// 如果只是想限制误操作，可以改成某个工作目录。
-    root: []const u8 = "/",
     /// 子进程继承的环境变量。
     environ: std.process.Environ = .empty,
 
@@ -60,8 +57,7 @@ pub const Config = struct {
         \\  --session-ttl-days <n>  登录有效期，默认 7 天
         \\  --session-idle-hours <n>  空闲超时，默认 24 小时（0 关闭）
         \\  --max-connections <n>  最大并发连接，默认 64
-        \\  --check-config       只校验配置与 root，然后退出
-        \\  --root <dir>         文件管理根目录（默认 /，即整个文件系统）
+        \\  --check-config       只校验配置，然后退出
         \\  --max-sessions <n>   并发会话上限（默认 16）
         \\  --pty-idle-minutes <n>  断开后保留 shell 的分钟数（默认 30，0 关闭）
         \\  -h, --help           显示本帮助
@@ -75,14 +71,13 @@ pub const Config = struct {
         \\    "session_ttl_days": 7,
         \\    "session_idle_hours": 24,
         \\    "max_connections": 64,
-        \\    "root": "/",
         \\    "max_sessions": 16,
         \\    "pty_idle_minutes": 30
         \\  }
         \\
         \\环境变量: MYTTY_CONFIG / MYTTY_HOST / MYTTY_PORT / MYTTY_SHELL /
         \\          MYTTY_PASSWORD / MYTTY_SESSION_TTL_DAYS / MYTTY_SESSION_IDLE_HOURS /
-        \\          MYTTY_MAX_CONNECTIONS / MYTTY_ROOT / MYTTY_MAX_SESSIONS /
+        \\          MYTTY_MAX_CONNECTIONS / MYTTY_MAX_SESSIONS /
         \\          MYTTY_PTY_IDLE_MINUTES
         \\
         \\TLS 不在本程序范围内：请只监听回环地址，把明文 HTTP/WS 交给外部反向代理。
@@ -98,7 +93,6 @@ pub const Config = struct {
         session_ttl_days: ?u32 = null,
         session_idle_hours: ?u32 = null,
         max_connections: ?u32 = null,
-        root: ?[]const u8 = null,
         max_sessions: ?u32 = null,
         pty_idle_minutes: ?u32 = null,
     };
@@ -119,7 +113,6 @@ pub const Config = struct {
 
         // 2) 环境变量
         if (env.get("MYTTY_HOST")) |v| cfg.host = v;
-        if (env.get("MYTTY_ROOT")) |v| cfg.root = v;
         if (env.get("MYTTY_PASSWORD")) |v| cfg.password = v;
         if (env.get("MYTTY_SESSION_TTL_DAYS")) |v| cfg.session_ttl_days = try parseCount(v);
         if (env.get("MYTTY_SESSION_IDLE_HOURS")) |v| cfg.session_idle_hours = try parseCount(v);
@@ -157,8 +150,6 @@ pub const Config = struct {
                 cfg.max_connections = try parseCount(v);
             } else if (std.mem.eql(u8, arg, "--check-config")) {
                 // main 在启动前单独处理
-            } else if (optionValue(args, &i, "--root")) |v| {
-                cfg.root = v;
             } else if (optionValue(args, &i, "--max-sessions")) |v| {
                 cfg.max_sessions = try parseCount(v);
             } else if (optionValue(args, &i, "--pty-idle-minutes")) |v| {
@@ -216,7 +207,6 @@ fn loadConfigFile(
     if (file.session_ttl_days) |v| cfg.session_ttl_days = v;
     if (file.session_idle_hours) |v| cfg.session_idle_hours = v;
     if (file.max_connections) |v| cfg.max_connections = v;
-    if (file.root) |v| cfg.root = try alloc.dupe(u8, v);
     if (file.max_sessions) |v| cfg.max_sessions = v;
     if (file.pty_idle_minutes) |v| cfg.pty_idle_minutes = v;
     return file.shell != null;

@@ -10,6 +10,7 @@ const ROOT = process.env.ROOT;
 const CHROME = process.env.CHROME || undefined;
 const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
 const near = (a, b, tol = 10) => Math.abs(a - b) <= tol;
+const ROOT_NAME = path.basename(ROOT);
 
 (async () => {
   fs.writeFileSync(path.join(ROOT, "edit-me.txt"), "original line\n");
@@ -62,7 +63,16 @@ const near = (a, b, tol = 10) => Math.abs(a - b) <= tol;
   assert(!texts[0].includes("PANE_ONE_MARK"), "output not shared");
 
   await page.click("#toggle-files");
-  await page.waitForSelector("#file-list .entry");
+  // 文件面板从 / 开始；终端在 HOME(=ROOT) 里，cwd 同步后停在测试目录。
+  await page.waitForFunction(
+    (name) => {
+      const el = document.querySelector("#crumb button.active");
+      return !!el && el.textContent === name;
+    },
+    ROOT_NAME,
+    { timeout: 10000 }
+  );
+  await page.locator("#file-list .entry.file", { hasText: "edit-me.txt" }).waitFor();
   await page.locator("#file-list .entry.file", { hasText: "edit-me.txt" }).locator(".name").click();
   await page.waitForSelector("#editor-overlay:not([hidden])");
   assert((await page.locator("#editor-save svg").count()) === 1, "editor save uses an svg icon");

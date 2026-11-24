@@ -24,7 +24,7 @@ if [ ! -d tests/browser/node_modules ]; then
 fi
 
 zig build -Doptimize=safe
-./zig-out/bin/my-tty --port "$PORT" --password "$PASSWORD" --root "$ROOT" >"$LOG" 2>&1 &
+HOME="$ROOT" ./zig-out/bin/my-tty --port "$PORT" --password "$PASSWORD" >"$LOG" 2>&1 &
 PID=$!
 
 for _ in $(seq 1 50); do
