@@ -370,7 +370,7 @@ pub const Manager = struct {
             }
         }
 
-        const spawned = pty.spawn(self.gpa, .{
+        const spawned = pty.spawn(self.io, self.gpa, .{
             .shell = self.cfg.shell,
             .environ = self.cfg.environ,
             .cols = 80,
