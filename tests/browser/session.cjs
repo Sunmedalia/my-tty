@@ -61,7 +61,7 @@ function waitReady(ws) {
     await page.waitForTimeout(200);
   };
 
-  await page.goto(BASE + "/");
+  await page.goto(BASE + "/?debug=1");
   await page.fill("#login-password", PASSWORD);
   await page.click("#login-submit");
   await page.waitForSelector(".pane .xterm");
@@ -90,6 +90,31 @@ function waitReady(ws) {
     { timeout: 10000 }
   );
   assert((await termText()).includes("TOKEN=ALIVE"), "same shell after reload");
+
+  // 心跳：空终端没有输出，服务端必须应答 ping，否则空闲时会被误判成掉线。
+  const rxBefore = await page.evaluate(() => window.__myttyDebug.panes[0].lastRx);
+  await page.evaluate(() => window.__myttyDebug.ping());
+  await page.waitForFunction(
+    (before) => window.__myttyDebug.panes[0].lastRx > before,
+    rxBefore,
+    { timeout: 5000 }
+  );
+
+  // 断线自动重连：连接被关掉后应自己接回同一个 shell，不需要点状态栏。
+  const sidBeforeDrop = (await storedIds())[0];
+  const opensBefore = await page.evaluate(() => window.__myttyDebug.panes[0].opens);
+  await page.evaluate(() => window.__myttyDebug.closeWs());
+  await page.waitForFunction(
+    (n) => window.__myttyDebug.panes[0].opens > n,
+    opensBefore,
+    { timeout: 15000 }
+  );
+  await page.waitForFunction(
+    (sid) => JSON.parse(sessionStorage.getItem("myttty.tabs")).tabs[0].s[0] === sid,
+    sidBeforeDrop,
+    { timeout: 5000 }
+  );
+  assert((await termText()).includes("SECOND_MARK"), "content kept after auto reconnect");
 
   // 回放之后复制/粘贴仍然正常
   await selectAllWithMouse();
@@ -123,9 +148,19 @@ function waitReady(ws) {
     other.onerror = () => rej(new Error("second websocket failed"));
   });
   await page.waitForFunction(
-    () => document.querySelector(".pane-status").textContent.includes("已断开"),
+    () => document.querySelector(".pane-status").textContent.includes("接管"),
     null,
     { timeout: 10000 }
+  );
+  // 被接管不是掉线：不能自动重连，否则两个页面会互相把对方踢下线。
+  await sleep(2500);
+  const takenOver = await page.evaluate(() => ({
+    text: document.querySelector(".pane-status").textContent,
+    alive: window.__myttyDebug.panes[0].alive,
+  }));
+  assert(
+    takenOver.text.includes("接管") && !takenOver.alive,
+    "takeover must not auto-reconnect: " + JSON.stringify(takenOver)
   );
   other.close();
   await sleep(300);

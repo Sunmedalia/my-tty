@@ -504,6 +504,13 @@
       ws: null,
       alive: false,
       reconnect: null,
+      // 心跳/自动重连状态。
+      lastRx: 0,
+      hbTimer: null,
+      retryTimer: null,
+      retryAttempt: 0,
+      retryable: true,
+      opens: 0,
     };
     tab.panes.push(pane);
     tab.activePane = pane;
@@ -544,6 +551,12 @@
     const list = tab ? tab.panes : panes;
     const idx = list.indexOf(pane);
     if (idx === -1) return;
+    pane.retryable = false;
+    stopHeartbeat(pane);
+    if (pane.retryTimer) {
+      clearTimeout(pane.retryTimer);
+      pane.retryTimer = null;
+    }
     if (pane.ws) {
       // 显式关闭分屏 = 结束这个会话；页面刷新/断网不会发这条消息。
       try {
@@ -595,21 +608,38 @@
   }
 
   async function connectPane(pane) {
+    if (!pane.el.isConnected) return;
+    if (pane.retryTimer) {
+      clearTimeout(pane.retryTimer);
+      pane.retryTimer = null;
+    }
+    const current = pane.ws;
+    if (current && (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
     setPaneStatus(pane, "连接中…", "pending");
+    pane.reconnect = () => connectPane(pane);
 
     let ticket = "";
     try {
-      const res = await fetch("/api/auth/ticket", { method: "POST" });
+      const res = await fetch("/api/auth/ticket", { method: "POST", cache: "no-store" });
       if (!res.ok) {
-        if (res.status === 401) showLogin("登录已失效，请重新登录");
-        setPaneStatus(pane, "认证失败（点击重试）", "error");
-        pane.reconnect = () => connectPane(pane);
+        if (res.status === 401) {
+          // 登录真的失效了：停止自动重连，登录成功后 startApp 会统一重试。
+          pane.retryable = false;
+          showLogin("登录已失效，请重新登录");
+          setPaneStatus(pane, "认证失败（点击重试）", "error");
+        } else {
+          setPaneStatus(pane, "无法获取连接票据", "error");
+          scheduleReconnect(pane);
+        }
         return;
       }
       ticket = (await res.json()).ticket || "";
     } catch (err) {
+      // 网络问题不等于登录失效：不弹登录框，安静退避重试。
       setPaneStatus(pane, "无法获取连接票据", "error");
-      pane.reconnect = () => connectPane(pane);
+      scheduleReconnect(pane);
       return;
     }
 
@@ -623,7 +653,7 @@
     try {
       ws = new WebSocket(url);
     } catch (err) {
-      setPaneStatus(pane, "连接失败", "error");
+      scheduleReconnect(pane);
       return;
     }
     ws.binaryType = "arraybuffer";
@@ -632,6 +662,10 @@
 
     ws.onopen = () => {
       pane.alive = true;
+      pane.opens += 1;
+      pane.retryAttempt = 0;
+      pane.retryable = true;
+      startHeartbeat(pane);
       setPaneStatus(pane, "已连接", "ok");
       fitPane(pane);
       // 点击状态栏重连后把焦点还给终端，否则接下来的按键会落到 body 上；
@@ -640,6 +674,7 @@
       updateSummary();
     };
     ws.onmessage = (event) => {
+      pane.lastRx = Date.now();
       if (typeof event.data !== "string") {
         const bytes = new Uint8Array(event.data);
         pane.offset += bytes.byteLength;
@@ -672,9 +707,12 @@
       } else if (msg.t === "exit") {
         pane.sessionId = "";
         pane.offset = 0;
+        pane.retryable = false;
         saveSessions();
         setPaneStatus(pane, "Shell 已退出（点击重连）", "error");
       } else if (msg.t === "error") {
+        // 会话数满了再自动重连只会一直撞墙，交给用户点。
+        if (msg.reason === "too_many_sessions") pane.retryable = false;
         setPaneStatus(
           msg.reason === "too_many_sessions"
             ? "会话数已满（点击重试）"
@@ -685,16 +723,99 @@
         );
       }
     };
-    ws.onclose = () => {
+    ws.onclose = (event) => {
+      if (pane.ws !== ws) return; // 已经有新连接接管这个 pane，别动它的心跳
+      stopHeartbeat(pane);
+      pane.ws = null;
       pane.alive = false;
-      if (pane.status.textContent === "连接中…" || pane.status.textContent === "已连接") {
+      updateSummary();
+      // 4001 = 服务端说“另一个窗口接管了这个会话”。这时不能自动重连，
+      // 否则两个页面会互相踢来踢去。
+      if (event && event.code === 4001) {
+        pane.retryable = false;
+        setPaneStatus(pane, "已被其他窗口接管（点击重连）", "error");
+        return;
+      }
+      if (!pane.el.isConnected || !started) return;
+      if (pane.retryable) {
+        scheduleReconnect(pane);
+      } else if (pane.status.textContent === "连接中…" || pane.status.textContent === "已连接") {
         setPaneStatus(pane, "已断开（点击重连）", "error");
       }
-      updateSummary();
     };
     ws.onerror = () => {
       if (!pane.alive) setPaneStatus(pane, "连接被拒绝", "error");
     };
+  }
+
+  // 半开连接（手机锁屏、掉 Wi-Fi、笔记本睡眠）不会触发 onclose，只能靠心跳发现。
+  const HEARTBEAT_MS = 20000;
+  const STALE_MS = 55000;
+
+  function sendPing(pane) {
+    const ws = pane.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify({ t: "ping" }));
+    } catch (_) {}
+  }
+
+  function startHeartbeat(pane) {
+    stopHeartbeat(pane);
+    pane.lastRx = Date.now();
+    pane.hbTimer = setInterval(() => {
+      const ws = pane.ws;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      // 后台标签页的定时器会被浏览器限流；这时不做超时判断，
+      // 否则在后台放一会儿就会被误判成掉线。
+      if (document.hidden) return;
+      if (Date.now() - pane.lastRx > STALE_MS) {
+        // 发得出去、但一个心跳应答都收不到：连接已经是半开的，主动关掉重连。
+        try {
+          ws.close();
+        } catch (_) {}
+        return;
+      }
+      sendPing(pane);
+    }, HEARTBEAT_MS);
+  }
+
+  function stopHeartbeat(pane) {
+    if (pane.hbTimer) {
+      clearInterval(pane.hbTimer);
+      pane.hbTimer = null;
+    }
+  }
+
+  function scheduleReconnect(pane) {
+    if (!pane.el.isConnected || !started || !pane.retryable || pane.retryTimer) return;
+    const attempt = pane.retryAttempt || 0;
+    pane.retryAttempt = attempt + 1;
+    const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt, 5));
+    setPaneStatus(pane, "已断开，正在重连…", "pending");
+    pane.retryTimer = setTimeout(() => {
+      pane.retryTimer = null;
+      if (!pane.el.isConnected || !started || !pane.retryable) return;
+      const ws = pane.ws;
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      connectPane(pane);
+    }, delay);
+  }
+
+  /// 登录成功后把因为 401 停下来的分屏全部重新拉起来。
+  function retryDeadPanes() {
+    for (const tab of tabs) {
+      for (const pane of tab.panes) {
+        if (pane.alive || !pane.el.isConnected) continue;
+        pane.retryable = true;
+        pane.retryAttempt = 0;
+        if (pane.retryTimer) {
+          clearTimeout(pane.retryTimer);
+          pane.retryTimer = null;
+        }
+        connectPane(pane);
+      }
+    }
   }
 
   function setPaneStatus(pane, text, kind) {
@@ -1868,7 +1989,16 @@
     });
   }
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) panes.forEach(fitPane);
+    if (!document.hidden) {
+      panes.forEach(fitPane);
+      // 后台时心跳暂停；回到前台先确认连接还活着，半开的连接会被心跳关掉重连。
+      for (const tab of tabs) {
+        for (const pane of tab.panes) {
+          pane.lastRx = Date.now();
+          sendPing(pane);
+        }
+      }
+    }
   });
 
   if (window.matchMedia && window.matchMedia("(max-width: 820px)").matches) {
@@ -2068,7 +2198,12 @@
 
   async function startApp() {
     hideLogin();
-    if (started) return;
+    if (started) {
+      // 重新登录后：恢复心跳检查，并把因 401 停下来的分屏接回去。
+      startAuthKeepalive();
+      retryDeadPanes();
+      return;
+    }
     started = true;
     // 终端字体必须在创建 Terminal 之前就绪，否则 xterm 会按回退字体算字宽，
     // 之后字体加载完也不会重算 letter-spacing，方框/方块字符会出现缝隙。
@@ -2084,6 +2219,7 @@
     }
     layoutTabs();
     refreshFiles();
+    startAuthKeepalive();
   }
 
   function validSessionId(sid) {
@@ -2135,6 +2271,7 @@
 
   function stopApp() {
     started = false;
+    stopAuthKeepalive();
     for (const tab of [...tabs]) {
       for (const pane of [...tab.panes]) removePane(pane, false);
       tab.el.remove();
@@ -2155,15 +2292,59 @@
     } catch (_) {}
   }
 
-  async function refreshAuth() {
+  const AUTH_CHECK_MS = 5 * 60 * 1000;
+  let authCheckTimer = null;
+
+  /// 页面开着就一直保持登录会话活跃。
+  ///
+  /// 服务端的空闲超时只被 HTTP 请求刷新，终端里的按键走 WebSocket 不算；
+  /// 没有这个心跳，挂着一个终端但从不刷新页面也会在 session_idle_hours 后过期。
+  function startAuthKeepalive() {
+    if (authCheckTimer) return;
+    authCheckTimer = setInterval(async () => {
+      try {
+        const res = await fetch("/api/auth/status", { cache: "no-store" });
+        if (res.status === 401) {
+          stopAuthKeepalive();
+          showLogin("登录已失效，请重新登录");
+        }
+      } catch (_) {
+        // 网络抖动不代表登录失效：保持现状，下一轮再试。
+      }
+    }, AUTH_CHECK_MS);
+  }
+
+  function stopAuthKeepalive() {
+    if (authCheckTimer) {
+      clearInterval(authCheckTimer);
+      authCheckTimer = null;
+    }
+  }
+
+  async function refreshAuth(attempt = 0) {
     try {
-      // 状态接口本身也要求认证：401 就是“未登录”。
-      const res = await fetch("/api/auth/status");
-      if (res.ok) startApp();
-      else if (res.status === 401) showLogin();
-      else showLogin(`服务端错误（HTTP ${res.status}）`);
+      // 状态接口本身也要求认证：401 才是“未登录”。
+      const res = await fetch("/api/auth/status", { cache: "no-store" });
+      if (res.ok) {
+        startApp();
+        return;
+      }
+      if (res.status === 401) {
+        showLogin();
+        return;
+      }
+      if (attempt < 3) {
+        setTimeout(() => refreshAuth(attempt + 1), 300 * (attempt + 1));
+        return;
+      }
+      showLogin(`服务端错误（HTTP ${res.status}），正在重试…`);
+      setTimeout(() => refreshAuth(0), 5000);
     } catch (_) {
-      showLogin("无法连接服务端");
+      // 请求失败可能只是网络还没恢复（手机刚解锁、Wi-Fi 正在重连），
+      // 不代表密码失效：自动退避重试，恢复后会直接进入界面。
+      if (attempt === 0) showLogin("无法连接服务端，正在自动重试…");
+      const delay = Math.min(5000, 400 * (attempt + 1));
+      setTimeout(() => refreshAuth(attempt + 1), delay);
     }
   }
 
@@ -2203,6 +2384,26 @@
     stopApp();
     showLogin("已注销");
   });
+
+  // 浏览器回归测试用：?debug=1 时暴露只读的实时状态（不包含任何凭据）。
+  if (new URLSearchParams(location.search).has("debug")) {
+    Object.defineProperty(window, "__myttyDebug", {
+      value: {
+        get panes() {
+          return panes;
+        },
+        allPanes: () => tabs.flatMap((tab) => tab.panes),
+        ping: () => tabs.flatMap((tab) => tab.panes).forEach(sendPing),
+        closeWs: () =>
+          tabs.flatMap((tab) => tab.panes).forEach((pane) => {
+            if (!pane.ws) return;
+            try {
+              pane.ws.close();
+            } catch (_) {}
+          }),
+      },
+    });
+  }
 
   refreshAuth();
 })();

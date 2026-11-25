@@ -148,6 +148,22 @@ fn sweepIdleConnections(io: Io) void {
     }
 }
 
+/// 让内核自己发现死连接：空闲 60 秒后每 15 秒探测一次，4 次失败后断开。
+/// 客户端掉电/掉 Wi-Fi/手机锁屏不会发 FIN，没有它服务端会永远挂着一个僵尸前端。
+/// 同时关掉 Nagle，终端按键不用等 40ms。
+fn tuneSocket(fd: posix.fd_t) void {
+    var one: c_int = 1;
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
+    var idle: c_int = 60;
+    posix.setsockopt(fd, posix.IPPROTO.TCP, linux.TCP.KEEPIDLE, std.mem.asBytes(&idle)) catch {};
+    var interval: c_int = 15;
+    posix.setsockopt(fd, posix.IPPROTO.TCP, linux.TCP.KEEPINTVL, std.mem.asBytes(&interval)) catch {};
+    var count: c_int = 4;
+    posix.setsockopt(fd, posix.IPPROTO.TCP, linux.TCP.KEEPCNT, std.mem.asBytes(&count)) catch {};
+    var nodelay: c_int = 1;
+    posix.setsockopt(fd, posix.IPPROTO.TCP, linux.TCP.NODELAY, std.mem.asBytes(&nodelay)) catch {};
+}
+
 /// 退出时唤醒所有已接受连接（包括正在传文件的），让连接线程尽快返回。
 fn shutdownAllConnections(io: Io) void {
     conn_mutex.lockUncancelable(io);
@@ -218,6 +234,7 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
         }
 
         connAdd(io, stream.socket.handle);
+        tuneSocket(stream.socket.handle);
         const thread = std.Thread.spawn(.{}, connectionMain, .{
             io, gpa, stream, cfg, &auth_state, &manager,
         }) catch {
@@ -305,6 +322,11 @@ fn connectionMain(
                     return;
                 }
                 if (!wsAuthorized(auth_state, &request)) {
+                    var pb: [64]u8 = undefined;
+                    std.debug.print("未认证 ws peer={s} cookie={s}\n", .{
+                        peerText(&pb, peer),
+                        if (auth.cookieFromRequest(&request) == null) "no" else "yes",
+                    });
                     respondClose(&request, "unauthorized\n", .unauthorized) catch {};
                     return;
                 }
@@ -380,8 +402,22 @@ fn handleHttp(
 
     // 其余所有 API（含注销、状态、票据）都必须先通过会话认证。
     if (std.mem.startsWith(u8, path, "/api/")) {
-        if (!authorized(auth_state, request)) return deny(request);
-        if (std.mem.eql(u8, path, "/api/auth/logout")) return handleLogout(auth_state, trust_forwarded, request);
+        if (!authorized(auth_state, request)) {
+            // 登录过期和“网络没恢复”在浏览器里看起来一样；这条日志用来区分：
+            // 真的 401 会打 cookie=yes/no，纯网络失败则什么都不会打。
+            var pb: [64]u8 = undefined;
+            std.debug.print("未认证 API path={s} peer={s} cookie={s}\n", .{
+                path,
+                peerText(&pb, peer),
+                if (auth.cookieFromRequest(request) == null) "no" else "yes",
+            });
+            return deny(request);
+        }
+        if (std.mem.eql(u8, path, "/api/auth/logout")) {
+            var pb: [64]u8 = undefined;
+            std.debug.print("注销 peer={s}\n", .{peerText(&pb, peer)});
+            return handleLogout(auth_state, trust_forwarded, request);
+        }
         if (std.mem.eql(u8, path, "/api/auth/status")) return handleStatus(auth_state, request);
         if (std.mem.eql(u8, path, "/api/auth/ticket")) return handleTicket(auth_state, request);
         if (std.mem.startsWith(u8, path, "/api/fs/")) return fsapi.handle(io, gpa, request);

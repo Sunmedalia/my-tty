@@ -54,6 +54,23 @@ pub const Attachment = struct {
     }
 };
 
+/// 会话被新前端接管时发给旧前端的 WebSocket 关闭码。
+///
+/// 浏览器拿到这个码就知道“不是我掉线，是别的窗口接管了”，因此不会自动重连；
+/// 否则两个页面会互相把对方踢下线，来回争抢同一个 shell。
+const taken_over_close = [2]u8{ 0x0F, 0xA1 }; // 4001
+
+fn sendTakenOver(att: *Attachment) void {
+    // 拿不到发送锁说明旧前端正在写（可能卡在慢客户端上），直接跳过：
+    // 关闭码只是提示，拿不到就退化成普通的异常断开。
+    if (!att.send_mutex.tryLock()) return;
+    defer att.send_mutex.unlock(att.io);
+    // 旧客户端的接收窗口可能已经满了；最多等 1 秒，绝不能拖住 attach。
+    var tv: posix.timeval = .{ .sec = 1, .usec = 0 };
+    posix.setsockopt(att.stream.socket.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
+    att.ws.writeMessage(&taken_over_close, .connection_close) catch {};
+}
+
 pub const Manager = struct {
     io: Io,
     gpa: Allocator,
@@ -119,6 +136,7 @@ pub const Manager = struct {
         // ref，必须等它自己 detach 后才能释放 Session。
         if (session.attachment) |old| {
             old.alive.store(false, .release);
+            sendTakenOver(old);
             old.stream.shutdown(self.io, .both) catch {};
             session.attachment = null;
         }
@@ -726,6 +744,11 @@ pub fn serve(
                 if (std.mem.eql(u8, control.t, "close")) {
                     manager.destroyAttached(&att);
                     return;
+                }
+                if (std.mem.eql(u8, control.t, "ping")) {
+                    // 应用层心跳：空终端没有输出，靠它确认连接还活着。
+                    att.sendText("{\"t\":\"pong\"}") catch return;
+                    continue;
                 }
                 if (std.mem.eql(u8, control.t, "cwd")) {
                     const s = att.session orelse return;
