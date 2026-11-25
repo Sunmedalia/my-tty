@@ -1,7 +1,8 @@
 //! 常驻 PTY 会话管理器（不依赖任何终端复用器）。
 //!
 //! WebSocket 只是会话的一个“前端”：断开后 PTY 继续运行，输出进入每会话
-//! 512 KiB 的环形缓冲。重连时客户端带上会话 id 和已收到的字节偏移，服务端
+//! 最多 512 KiB（初始 64 KiB，按需增长）的环形缓冲。重连时客户端带上会话 id
+//! 和已收到的字节偏移，服务端
 //! 只回放缺失部分（不会 reset 终端，因此不影响文本选择/复制）。
 //!
 //! 线程模型：
@@ -31,7 +32,9 @@ const config = @import("config.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// 会话输出缓冲的上限；创建时只分配 initial_ring_capacity，按需翻倍。
 const ring_capacity: usize = 512 * 1024;
+const initial_ring_capacity: usize = 64 * 1024;
 const closed_grace_ns: i96 = 60 * std.time.ns_per_s;
 
 pub const Attachment = struct {
@@ -382,7 +385,7 @@ pub const Manager = struct {
             _ = linux.close(spawned.master);
             return error.OutOfMemory;
         };
-        const buf = self.gpa.alloc(u8, ring_capacity) catch {
+        const buf = self.gpa.alloc(u8, initial_ring_capacity) catch {
             self.gpa.destroy(s);
             killChild(spawned.child);
             _ = linux.close(spawned.master);
@@ -398,6 +401,7 @@ pub const Manager = struct {
             .master = spawned.master,
             .child = spawned.child,
             .buf = buf,
+            .buf_max = ring_capacity,
             .last_activity_ns = self.now(),
         };
 
@@ -516,6 +520,8 @@ const Session = struct {
     pump_thread: ?std.Thread = null,
     mutex: Io.Mutex = .init,
     buf: []u8,
+    /// 允许增长到的上限；0 表示固定容量（测试用栈缓冲）。
+    buf_max: usize = 0,
     /// buf 中有效数据的起点（环形）。
     start: usize = 0,
     len: usize = 0,
@@ -545,6 +551,16 @@ const Session = struct {
 
     fn appendLocked(self: *Session, data: []const u8) void {
         self.total += data.len;
+
+        // 空闲会话只占 64 KiB；输出多了再翻倍到 512 KiB，避免一开始就全量常驻。
+        const needed = self.len + data.len;
+        if (needed > self.buf.len and self.buf.len < self.buf_max) {
+            var want = self.buf.len;
+            while (want < needed and want < self.buf_max) want *= 2;
+            if (want > self.buf_max) want = self.buf_max;
+            if (want > self.buf.len) _ = self.growLocked(want);
+        }
+
         if (data.len >= self.buf.len) {
             // 单次输出比整个缓冲还大，只保留最后 buf.len 字节。
             const tail = data[data.len - self.buf.len ..];
@@ -572,6 +588,19 @@ const Session = struct {
             @memcpy(self.buf[0 .. data.len - first], data[first..]);
         }
         self.len += data.len;
+    }
+
+    /// 扩容并把环形内容按顺序搬成线性布局（start = 0）。失败时保持原缓冲。
+    fn growLocked(self: *Session, want: usize) bool {
+        const gpa = self.manager.gpa;
+        const new_buf = gpa.alloc(u8, want) catch return false;
+        const first = @min(self.len, self.buf.len - self.start);
+        @memcpy(new_buf[0..first], self.buf[self.start..][0..first]);
+        if (self.len > first) @memcpy(new_buf[first..self.len], self.buf[0 .. self.len - first]);
+        gpa.free(self.buf);
+        self.buf = new_buf;
+        self.start = 0;
+        return true;
     }
 
     /// 发送环形缓冲的一段；数据可能在物理上分成两段。
@@ -862,6 +891,44 @@ test "ring buffer keeps the newest bytes for arbitrary appends" {
             got[0..s.len],
         );
     }
+}
+
+test "ring buffer grows on demand up to its cap" {
+    const io = std.testing.io;
+    var cfg = config.Config{};
+    var m = Manager.init(io, std.testing.allocator, &cfg);
+    defer m.deinit();
+
+    var s: Session = .{
+        .manager = &m,
+        .id = @splat(0),
+        .master = -1,
+        .child = -1,
+        .buf = try std.testing.allocator.alloc(u8, 4),
+        .buf_max = 16,
+    };
+    defer std.testing.allocator.free(s.buf);
+
+    s.appendLocked("ab");
+    try std.testing.expectEqual(@as(usize, 4), s.buf.len);
+    s.appendLocked("cdef");
+    try std.testing.expectEqual(@as(usize, 8), s.buf.len);
+    s.appendLocked("ghijklmn");
+    try std.testing.expectEqual(@as(usize, 16), s.buf.len);
+    try std.testing.expectEqual(@as(u64, 14), s.total);
+    try std.testing.expectEqual(@as(usize, 14), s.len);
+    try std.testing.expectEqual(@as(u64, 0), s.start_abs);
+
+    var got: [16]u8 = undefined;
+    for (0..s.len) |i| got[i] = s.buf[(s.start + i) % s.buf.len];
+    try std.testing.expectEqualStrings("abcdefghijklmn", got[0..s.len]);
+
+    s.appendLocked("op");
+    s.appendLocked("qr");
+    try std.testing.expectEqual(@as(usize, 16), s.buf.len);
+    try std.testing.expectEqual(@as(u64, 2), s.start_abs);
+    for (0..s.len) |i| got[i] = s.buf[(s.start + i) % s.buf.len];
+    try std.testing.expectEqualStrings("cdefghijklmnopqr", got[0..s.len]);
 }
 
 test "control message parsing" {

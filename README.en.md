@@ -245,8 +245,8 @@ Copy/paste follows terminal semantics:
 
 ## Session persistence
 
-No tmux/screen needed: the server keeps each pane's PTY and a 512 KiB ring
-buffer.
+No tmux/screen needed: the server keeps each pane's PTY and a ring buffer that
+starts at 64 KiB and grows to 512 KiB as output accumulates.
 
 - Reloading the page or reconnecting after a network drop attaches back to the
   **same shell**; environment variables, cwd, and running programs are
