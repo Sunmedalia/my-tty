@@ -1,6 +1,6 @@
 //! 登录会话：密码登录 -> 随机 session id -> HttpOnly Cookie。
 //!
-//! 会话只存在内存里：进程重启后全部失效，需要重新登录。容量固定 64 个，
+//! 会话只存在内存里：进程重启后全部失效，需要重新登录。容量固定 256 个，
 //! 过期或被覆盖的槽位直接复用，不需要额外的清理线程。
 
 const std = @import("std");
@@ -9,7 +9,9 @@ const http = std.http;
 const config = @import("config.zig");
 
 pub const cookie_name = "my_tty_session";
-pub const max_sessions = 64;
+/// 每个槽位只有几十字节，256 个约 10 KiB；留足余量，避免反复登录/多设备测试时
+/// 把还在用的旧会话挤掉（被挤掉的浏览器下次请求就是 401）。
+pub const max_sessions = 256;
 
 pub const Auth = struct {
     io: Io,
