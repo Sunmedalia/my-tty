@@ -78,14 +78,17 @@ pub const Auth = struct {
         const ttl = self.ttlNs();
 
         var slot: usize = 0;
-        var oldest: i96 = std.math.maxInt(i96);
+        var lru: i96 = std.math.maxInt(i96);
         for (&self.sessions, 0..) |*s, i| {
             if (!s.used or s.expires_ns <= now) {
                 slot = i;
                 break;
             }
-            if (s.expires_ns < oldest) {
-                oldest = s.expires_ns;
+            // 满员时淘汰“最久没被任何请求碰过”的会话，而不是最早登录的那个：
+            // 所有会话都是 now+7天，按 expires 淘汰等于专挑用户每天在用的老窗口，
+            // 反而留下刚登录后再没动过的槽位。
+            if (s.last_seen_ns < lru) {
+                lru = s.last_seen_ns;
                 slot = i;
             }
         }
@@ -304,6 +307,23 @@ test "login validate logout" {
 
     auth.logout(&session.cookie);
     try std.testing.expect(!auth.validate(&session.cookie));
+}
+
+test "full session table evicts the least recently used session" {
+    const io = std.testing.io;
+    var auth = Auth.init(io, "pw", 7, 24);
+
+    var cookies: [max_sessions][32]u8 = undefined;
+    for (&cookies) |*c| c.* = auth.login("pw").?.cookie;
+
+    // 第一个会话刚被请求过（last_seen 最新）；第二个会话登录后再没动过。
+    try std.testing.expect(auth.validate(&cookies[0]));
+
+    const extra = auth.login("pw").?;
+    // 正在用的窗口不能被挤掉，淘汰的应该是第二个会话。
+    try std.testing.expect(auth.validate(&cookies[0]));
+    try std.testing.expect(auth.validate(&extra.cookie));
+    try std.testing.expect(!auth.validate(&cookies[1]));
 }
 
 test "zero ttl expires immediately" {
