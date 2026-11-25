@@ -1424,30 +1424,40 @@
     for (const entry of root.entries) treeHtml(out, "", entry);
     fileList.innerHTML = out.join("");
     fileList.scrollTop = scrollTop;
+    syncTreeRowHeight();
+  }
+
+  // content-visibility 用估算行高布局被跳过的行；估算和真实值不一致会让
+  // 滚动位置在行真正渲染时跳动。行高对所有叶子行都一样，量一次即可。
+  let measuredRowHeight = 0;
+  let measuredTreeWidth = -1;
+  function syncTreeRowHeight() {
+    const width = fileList.clientWidth;
+    if (measuredRowHeight && width === measuredTreeWidth) return;
+    const row = fileList.querySelector(".entry");
+    if (!row) return;
+    const height = row.getBoundingClientRect().height;
+    // 面板隐藏时 rect 为 0；等下一次可见的渲染再量。
+    if (!(height > 0)) return;
+    measuredTreeWidth = width;
+    measuredRowHeight = height;
+    fileList.style.setProperty("--tree-row-height", `${height}px`);
   }
 
   function scrollTreeToSelected(alignTop = false) {
-    // content-visibility 会让视口外的行按估算高度参与布局，一次修正可能不
-    // 到位；多量几次，等被跳过的行落进视口、拿到真实高度后再收敛。
-    for (let pass = 0; pass < 3; pass++) {
-      const sel = fileList.querySelector(".entry.selected");
-      if (!sel) return;
-      const list = fileList.getBoundingClientRect();
-      const row = sel.getBoundingClientRect();
-      if (alignTop) {
-        // cwd 同步时尽量把目标放到列表顶部，下面直接露出目录内容。
-        const gap = row.top - list.top - 4;
-        if (Math.abs(gap) <= 1) return;
-        fileList.scrollTop = Math.max(0, fileList.scrollTop + gap);
-        continue;
-      }
-      if (row.top < list.top) {
-        fileList.scrollTop -= list.top - row.top;
-      } else if (row.bottom > list.bottom) {
-        fileList.scrollTop += row.bottom - list.bottom;
-      } else {
-        return;
-      }
+    const sel = fileList.querySelector(".entry.selected");
+    if (!sel) return;
+    const list = fileList.getBoundingClientRect();
+    const row = sel.getBoundingClientRect();
+    if (alignTop) {
+      // cwd 同步时尽量把目标放到列表顶部，下面直接露出目录内容。
+      fileList.scrollTop = Math.max(0, fileList.scrollTop + (row.top - list.top) - 4);
+      return;
+    }
+    if (row.top < list.top) {
+      fileList.scrollTop -= list.top - row.top;
+    } else if (row.bottom > list.bottom) {
+      fileList.scrollTop += row.bottom - list.bottom;
     }
   }
 

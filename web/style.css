@@ -533,9 +533,14 @@ button.icon {
 
 #file-list .tree-node {
   list-style: none;
-  /* 几千行时只布局视口附近的行；行高固定，估算值不会造成滚动条跳动。 */
+}
+
+/* 只对“叶子行”（文件、折叠的目录）跳过视口外的布局：它们的行高一致。
+   展开的目录行高度包含整棵子树，不能按行高估算，否则滚动条会跳。
+   行高由 JS 实测一次写进 --tree-row-height，估算值与真实值完全一致。 */
+#file-list li.tree-node:not(:has(> .tree-children)) {
   content-visibility: auto;
-  contain-intrinsic-size: auto 24px;
+  contain-intrinsic-size: var(--tree-row-height, 22px);
 }
 
 #file-list .entry .caret {
