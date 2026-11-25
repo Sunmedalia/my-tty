@@ -303,7 +303,13 @@ composed `insertText`，无条件清标记会让字符变成两个（`ls` → `l
 zig test src/tests.zig        # 配置、认证/会话、PTY 环境、协议、文件边界
 ./scripts/smoke.sh            # 真实进程：认证、文件/分片/归档、WS+PTY、优雅退出
 ./scripts/browser_test.sh     # 浏览器回归（先 npm --prefix tests/browser ci 并装 chromium）
-./scripts/build-release.sh    # ReleaseSafe + strip，约 1.7 MiB
+./scripts/build-release.sh    # ReleaseSafe + strip，约 1.4 MiB
 ```
 
 CI 在 `.github/workflows/ci.yml`：格式检查、构建、单测、smoke，以及独立的浏览器任务。
+
+## 许可证
+
+本项目以 MIT 许可证发布，见 [LICENSE](LICENSE)。二进制内嵌的 xterm.js（MIT）
+和 JetBrains Mono 字体（OFL 1.1）许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，
+发布包的 `licenses/` 目录里也带完整文本。

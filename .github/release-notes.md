@@ -35,6 +35,11 @@ cd my-tty-@VERSION@-x86_64
 sha256sum -c SHA256SUMS
 ```
 
+## 许可证
+
+本项目以 MIT 许可证发布。包内 `LICENSE` 是项目许可证，`licenses/` 是内嵌的
+xterm.js（MIT）和 JetBrains Mono（OFL 1.1）的完整文本。
+
 ---
 
 Static single-binary web terminal for Linux (x86_64, aarch64): PTY sessions survive reloads, tabs/panes, password auth, file manager, embedded gzip assets. No Node, database, or reverse proxy required. Built with Zig 0.17.1; see README.en.md.

@@ -50,10 +50,15 @@ jobs:
           set -euo pipefail
           version="${RELEASE_TAG#v}"
           pkg="my-tty-${version}-${{ matrix.arch }}"
-          mkdir -p "dist/$pkg/deploy"
+          mkdir -p "dist/$pkg/deploy" "dist/$pkg/licenses"
           cp zig-out/bin/my-tty "dist/$pkg/"
-          cp README.md README.en.md my-tty.example.json "dist/$pkg/"
+          cp README.md README.en.md my-tty.example.json LICENSE THIRD_PARTY_NOTICES.md "dist/$pkg/"
           cp deploy/my-tty.service "dist/$pkg/deploy/"
+          cp web/vendor/xterm/LICENSE "dist/$pkg/licenses/xterm.txt"
+          cp web/vendor/xterm/LICENSE.addon-fit "dist/$pkg/licenses/xterm-addon-fit.txt"
+          cp web/vendor/xterm/LICENSE.addon-search "dist/$pkg/licenses/xterm-addon-search.txt"
+          cp web/vendor/xterm/LICENSE.addon-web-links "dist/$pkg/licenses/xterm-addon-web-links.txt"
+          cp web/vendor/fonts/OFL.txt "dist/$pkg/licenses/JetBrainsMono-OFL.txt"
           tar -C dist -czf "dist/$pkg-linux.tar.gz" "$pkg"
           ( cd dist && sha256sum "$pkg-linux.tar.gz" > "$pkg-linux.tar.gz.sha256" )
       - uses: actions/upload-artifact@v4

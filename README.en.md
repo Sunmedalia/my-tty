@@ -368,8 +368,15 @@ created, keeping TUI borders and blocks continuous.
 zig test src/tests.zig        # config, auth/sessions, PTY env, protocol, file paths
 ./scripts/smoke.sh            # real process: auth, files/chunks/archive, WS+PTY, graceful shutdown
 ./scripts/browser_test.sh     # browser regression (npm --prefix tests/browser ci + chromium first)
-./scripts/build-release.sh    # ReleaseSafe + strip, ~1.7 MiB
+./scripts/build-release.sh    # ReleaseSafe + strip, ~1.4 MiB
 ```
 
 CI lives in `.github/workflows/ci.yml`: format check, build, unit tests, smoke,
 and a separate browser job.
+
+## License
+
+Released under the MIT License; see [LICENSE](LICENSE). The embedded xterm.js
+(MIT) and JetBrains Mono font (OFL 1.1) notices are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); release archives also ship the
+full texts in their `licenses/` directory.
