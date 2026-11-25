@@ -31,8 +31,6 @@ var shutting_down = std.atomic.Value(bool).init(false);
 var listen_handle = std.atomic.Value(posix.fd_t).init(-1);
 var active_connections = std.atomic.Value(u32).init(0);
 
-const max_tracked_connections = 4096;
-
 const ConnSlot = struct {
     fd: posix.fd_t = -1,
     last_ns: i96 = 0,
@@ -41,10 +39,52 @@ const ConnSlot = struct {
     waiting_head: bool = false,
 };
 var conn_mutex: Io.Mutex = .init;
-var conn_slots: [max_tracked_connections]ConnSlot = @splat(.{});
+/// 按 `max_connections` 在启动时分配；默认 64，而不是固定 4096。
+var conn_slots: []ConnSlot = &.{};
 
 fn monotonicNs(io: Io) i96 {
     return Io.Clock.awake.now(io).nanoseconds;
+}
+
+/// 未认证请求日志限速：每个来源 IP 最多每秒一行，避免匿名客户端刷 journal。
+const AuthLogSlot = struct {
+    addr: u32 = 0,
+    last_ns: i96 = 0,
+    used: bool = false,
+};
+const max_auth_log_ips = 16;
+var auth_log_mutex: Io.Mutex = .init;
+var auth_log_slots: [max_auth_log_ips]AuthLogSlot = @splat(.{});
+
+fn shouldLogAuthFailure(io: Io, peer: net.IpAddress) bool {
+    const addr: u32 = switch (peer) {
+        .ip4 => |a| std.mem.readInt(u32, &a.bytes, .big),
+        .ip6 => 0,
+    };
+    auth_log_mutex.lockUncancelable(io);
+    defer auth_log_mutex.unlock(io);
+    const now = monotonicNs(io);
+    var free: ?*AuthLogSlot = null;
+    for (&auth_log_slots) |*s| {
+        if (!s.used) {
+            if (free == null) free = s;
+            continue;
+        }
+        if (s.addr == addr) {
+            if (now - s.last_ns < std.time.ns_per_s) return false;
+            s.last_ns = now;
+            return true;
+        }
+    }
+    const slot = free orelse blk: {
+        var oldest = &auth_log_slots[0];
+        for (&auth_log_slots) |*s| {
+            if (s.last_ns < oldest.last_ns) oldest = s;
+        }
+        break :blk oldest;
+    };
+    slot.* = .{ .addr = addr, .last_ns = now, .used = true };
+    return true;
 }
 
 /// 登记一条已接受的连接；表满时也返回（该连接只是不参与超时/退出唤醒）。
@@ -52,13 +92,13 @@ fn connAdd(io: Io, fd: posix.fd_t) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
     const ts = monotonicNs(io);
-    for (&conn_slots) |*s| {
+    for (conn_slots) |*s| {
         if (s.fd == fd) {
             s.last_ns = ts;
             return;
         }
     }
-    for (&conn_slots) |*s| {
+    for (conn_slots) |*s| {
         if (s.fd < 0) {
             s.* = .{ .fd = fd, .last_ns = ts };
             return;
@@ -71,14 +111,14 @@ fn armIdle(io: Io, fd: posix.fd_t) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
     const ts = monotonicNs(io);
-    for (&conn_slots) |*s| {
+    for (conn_slots) |*s| {
         if (s.fd == fd) {
             s.waiting_head = true;
             s.last_ns = ts;
             return;
         }
     }
-    for (&conn_slots) |*s| {
+    for (conn_slots) |*s| {
         if (s.fd < 0) {
             s.* = .{ .fd = fd, .last_ns = ts, .waiting_head = true };
             return;
@@ -90,7 +130,7 @@ fn armIdle(io: Io, fd: posix.fd_t) void {
 fn disarmIdle(io: Io, fd: posix.fd_t) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
-    for (&conn_slots) |*s| {
+    for (conn_slots) |*s| {
         if (s.fd == fd) s.waiting_head = false;
     }
 }
@@ -100,7 +140,7 @@ fn connSetDeadline(io: Io, fd: posix.fd_t, seconds: i96) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
     const ts = monotonicNs(io);
-    for (&conn_slots) |*s| {
+    for (conn_slots) |*s| {
         if (s.fd == fd) {
             s.deadline_ns = ts + seconds * std.time.ns_per_s;
             return;
@@ -111,7 +151,7 @@ fn connSetDeadline(io: Io, fd: posix.fd_t, seconds: i96) void {
 fn connClearDeadline(io: Io, fd: posix.fd_t) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
-    for (&conn_slots) |*s| {
+    for (conn_slots) |*s| {
         if (s.fd == fd) s.deadline_ns = 0;
     }
 }
@@ -119,7 +159,7 @@ fn connClearDeadline(io: Io, fd: posix.fd_t) void {
 fn connRemove(io: Io, fd: posix.fd_t) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
-    for (&conn_slots) |*s| {
+    for (conn_slots) |*s| {
         if (s.fd == fd) {
             s.* = .{};
             return;
@@ -131,7 +171,7 @@ fn sweepIdleConnections(io: Io) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
     const ts = monotonicNs(io);
-    for (&conn_slots) |*s| {
+    for (conn_slots) |*s| {
         if (s.fd < 0) continue;
         if (s.waiting_head and ts - s.last_ns > http_idle_seconds * std.time.ns_per_s) {
             _ = linux.shutdown(s.fd, 2); // 唤醒阻塞在 receiveHead 的线程
@@ -161,7 +201,7 @@ fn tuneSocket(fd: posix.fd_t) void {
 fn shutdownAllConnections(io: Io) void {
     conn_mutex.lockUncancelable(io);
     defer conn_mutex.unlock(io);
-    for (&conn_slots) |*s| {
+    for (conn_slots) |*s| {
         if (s.fd >= 0) _ = linux.shutdown(s.fd, 2);
     }
 }
@@ -192,6 +232,15 @@ pub fn run(io: Io, gpa: Allocator, cfg: *const config.Config) !void {
     defer listener.deinit(io);
     listen_handle.store(listener.socket.handle, .release);
     defer listen_handle.store(-1, .release);
+
+    const slots = try gpa.alloc(ConnSlot, @intCast(cfg.max_connections));
+    for (slots) |*s| s.* = .{};
+    conn_slots = slots;
+    defer gpa.free(slots);
+
+    // 预压缩静态资源并生成本进程的 ETag；失败时逐个回退明文，不影响启动。
+    assets.prepare(io, gpa);
+    defer assets.deinit(gpa);
 
     installSignalHandlers();
 
@@ -318,11 +367,13 @@ fn connectionMain(
                     return;
                 }
                 if (!wsAuthorized(auth_state, &request)) {
-                    var pb: [64]u8 = undefined;
-                    std.debug.print("未认证 ws peer={s} cookie={s}\n", .{
-                        peerText(&pb, peer),
-                        if (auth.cookieFromRequest(&request) == null) "no" else "yes",
-                    });
+                    if (shouldLogAuthFailure(io, peer)) {
+                        var pb: [64]u8 = undefined;
+                        std.debug.print("未认证 ws peer={s} cookie={s}\n", .{
+                            peerText(&pb, peer),
+                            if (auth.cookieFromRequest(&request) == null) "no" else "yes",
+                        });
+                    }
                     respondClose(&request, "unauthorized\n", .unauthorized) catch {};
                     return;
                 }
@@ -401,12 +452,14 @@ fn handleHttp(
         if (!authorized(auth_state, request)) {
             // 登录过期和“网络没恢复”在浏览器里看起来一样；这条日志用来区分：
             // 真的 401 会打 cookie=yes/no，纯网络失败则什么都不会打。
-            var pb: [64]u8 = undefined;
-            std.debug.print("未认证 API path={s} peer={s} cookie={s}\n", .{
-                path,
-                peerText(&pb, peer),
-                if (auth.cookieFromRequest(request) == null) "no" else "yes",
-            });
+            if (shouldLogAuthFailure(io, peer)) {
+                var pb: [64]u8 = undefined;
+                std.debug.print("未认证 API path={s} peer={s} cookie={s}\n", .{
+                    path,
+                    peerText(&pb, peer),
+                    if (auth.cookieFromRequest(request) == null) "no" else "yes",
+                });
+            }
             return deny(request);
         }
         if (std.mem.eql(u8, path, "/api/auth/logout")) {
@@ -416,7 +469,17 @@ fn handleHttp(
         }
         if (std.mem.eql(u8, path, "/api/auth/status")) return handleStatus(request);
         if (std.mem.eql(u8, path, "/api/auth/ticket")) return handleTicket(auth_state, request);
-        if (std.mem.startsWith(u8, path, "/api/fs/")) return fsapi.handle(io, gpa, request);
+        if (std.mem.startsWith(u8, path, "/api/fs/")) {
+            // 大文件允许慢，但不能无限：按至少 32 KiB/s + 2 分钟给整个请求一个上限，
+            // 否则一个每分钟发一个字节的客户端能长期占住连接和上传临时文件。
+            if (request.head.method == .PUT and util.requestHasBody(request)) {
+                const bytes: i96 = @intCast(request.head.content_length orelse 0);
+                const seconds = @min(@as(i96, 3600), 120 + @divTrunc(bytes, 32 * 1024));
+                connSetDeadline(io, fd, seconds);
+                defer connClearDeadline(io, fd);
+            }
+            return fsapi.handle(io, gpa, request);
+        }
         return respond(request, "{\"error\":\"not_found\"}\n", .not_found);
     }
 
@@ -433,12 +496,65 @@ fn handleHttp(
     const asset = assets.find(path) orelse {
         return respond(request, "not found\n", .not_found);
     };
-    var headers: [8]http.Header = undefined;
-    const list = buildHeaders(&headers, &.{
-        .{ .name = "content-type", .value = asset.mime },
+    const use_gzip = asset.gzip != null and acceptsGzip(request);
+    const tag = assets.etag(use_gzip);
+    if (ifNoneMatch(request, tag)) return respondNotModified(request, asset, tag);
+
+    var extra: [5]http.Header = undefined;
+    var n: usize = 0;
+    extra[n] = .{ .name = "content-type", .value = asset.mime };
+    n += 1;
+    extra[n] = .{ .name = "cache-control", .value = asset.cache_control };
+    n += 1;
+    extra[n] = .{ .name = "etag", .value = tag };
+    n += 1;
+    extra[n] = .{ .name = "vary", .value = "accept-encoding" };
+    n += 1;
+    if (use_gzip) {
+        extra[n] = .{ .name = "content-encoding", .value = "gzip" };
+        n += 1;
+    }
+    var headers: [9]http.Header = undefined;
+    const list = buildHeaders(&headers, extra[0..n]);
+    return request.respond(if (use_gzip) asset.gzip.? else asset.body, .{ .extra_headers = list });
+}
+
+fn acceptsGzip(request: *const http.Server.Request) bool {
+    var it = request.iterateHeaders();
+    while (it.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "accept-encoding")) continue;
+        var parts = std.mem.splitScalar(u8, header.value, ',');
+        while (parts.next()) |part| {
+            const semi = std.mem.indexOfScalar(u8, part, ';') orelse part.len;
+            const token = std.mem.trim(u8, part[0..semi], " \t");
+            if (std.ascii.eqlIgnoreCase(token, "gzip")) return true;
+        }
+    }
+    return false;
+}
+
+fn ifNoneMatch(request: *const http.Server.Request, tag: []const u8) bool {
+    var it = request.iterateHeaders();
+    while (it.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "if-none-match")) continue;
+        var parts = std.mem.splitScalar(u8, header.value, ',');
+        while (parts.next()) |part| {
+            const value = std.mem.trim(u8, part, " \t");
+            if (std.mem.eql(u8, value, tag) or std.mem.eql(u8, value, "*")) return true;
+        }
+    }
+    return false;
+}
+
+fn respondNotModified(request: *http.Server.Request, asset: *const assets.Asset, tag: []const u8) !void {
+    var extra = [_]http.Header{
         .{ .name = "cache-control", .value = asset.cache_control },
-    });
-    return request.respond(asset.body, .{ .extra_headers = list });
+        .{ .name = "etag", .value = tag },
+        .{ .name = "vary", .value = "accept-encoding" },
+    };
+    var headers: [7]http.Header = undefined;
+    const list = buildHeaders(&headers, &extra);
+    return request.respond("", .{ .status = .not_modified, .extra_headers = list });
 }
 
 // ---------------------------------------------------------------------------

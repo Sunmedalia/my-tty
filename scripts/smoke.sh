@@ -53,6 +53,14 @@ echo "== security headers =="
 curl -fsSI "$BASE/" | grep -ci 'x-content-type-options: nosniff' >/dev/null
 pass headers
 
+echo "== gzip and cache =="
+cmp <(curl -fsS "$BASE/app.js") <(curl -fsS --compressed "$BASE/app.js")
+curl -fsSI -H 'Accept-Encoding: gzip' "$BASE/app.js" | grep -qi '^content-encoding: gzip'
+ETAG=$(curl -fsSI "$BASE/app.js" | tr -d '\r' | awk 'tolower($1)=="etag:" {print $2}')
+[ -n "$ETAG" ]
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -H "If-None-Match: $ETAG" "$BASE/app.js")" = "304" ]
+pass "gzip + etag"
+
 echo "== auth =="
 for path in "/api/fs/list?path=" "/api/fs/download?path=x" "/api/fs/upload?path=x" "/api/auth/status" "/api/auth/ticket" "/api/auth/logout"; do
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X GET "$BASE$path")

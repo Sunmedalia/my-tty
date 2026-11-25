@@ -3,6 +3,24 @@
 
 const std = @import("std");
 const http = std.http;
+const flate = std.compress.flate;
+
+/// 用 gzip 容器压缩一段资源。调用方负责释放返回值。
+///
+/// 只用于启动时预压缩内嵌的前端文件；`Compress` 自身约 224 KiB，刻意
+/// `noinline`，避免把这帧并进调用者（尤其是 main）的栈帧。
+pub noinline fn gzipAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out = try std.Io.Writer.Allocating.initCapacity(alloc, 64);
+    errdefer out.deinit();
+    const window = try alloc.alloc(u8, flate.max_window_len);
+    defer alloc.free(window);
+    const comp = try alloc.create(flate.Compress);
+    defer alloc.destroy(comp);
+    comp.* = try flate.Compress.init(&out.writer, window, .gzip, .default);
+    try comp.writer.writeAll(input);
+    try comp.finish();
+    return out.toOwnedSlice();
+}
 
 /// 所有响应共用的安全头。API 和静态资源都带上，避免两套路由逐渐走偏。
 pub const security_headers = [_]http.Header{
@@ -103,4 +121,15 @@ test "path strips query and fragment" {
     try std.testing.expectEqualStrings("/", pathOnly("/?a=1"));
     try std.testing.expectEqualStrings("/app.js", pathOnly("/app.js?v=1"));
     try std.testing.expectEqualStrings("/a", pathOnly("/a#x"));
+}
+
+test "gzip compresses repetitive input" {
+    var input: [8192]u8 = undefined;
+    @memset(&input, 'a');
+    const out = try gzipAlloc(std.testing.allocator, &input);
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(out.len > 16);
+    try std.testing.expectEqual(@as(u8, 0x1f), out[0]);
+    try std.testing.expectEqual(@as(u8, 0x8b), out[1]);
+    try std.testing.expect(out.len < input.len / 4);
 }

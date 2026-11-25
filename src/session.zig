@@ -644,14 +644,17 @@ fn refreshCwd(s: *Session, force: bool) void {
 fn pump(s: *Session) void {
     var read_buf: [8192]u8 = undefined;
     var fds = [_]posix.pollfd{.{ .fd = s.master, .events = posix.POLL.IN, .revents = 0 }};
+    // 500ms 一跳保证 stop 时的响应；cwd 每两跳查一次，空闲 /proc 读取减半。
+    var idle_ticks: u8 = 0;
     while (!s.stopping.load(.acquire)) {
         fds[0].revents = 0;
         const ready = posix.poll(&fds, 500) catch break;
         if (ready == 0) {
-            // shell 空闲时再查 cwd，避免持续输出时每个 8 KiB 块都读一次 /proc。
-            refreshCwd(s, false);
+            idle_ticks +%= 1;
+            if (idle_ticks % 2 == 1) refreshCwd(s, false);
             continue;
         }
+        idle_ticks = 0;
         if (fds[0].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) == 0) continue;
         const n = posix.read(s.master, &read_buf) catch |err| switch (err) {
             error.WouldBlock => continue,
@@ -702,8 +705,10 @@ const Control = struct {
     rows: ?u16 = null,
 };
 
-fn parseControl(alloc: Allocator, data: []const u8) !std.json.Parsed(Control) {
-    return std.json.parseFromSlice(Control, alloc, data, .{ .ignore_unknown_fields = true });
+/// 解析一条控制消息。分配只发生在调用方提供的栈缓冲里，消息用完即弃。
+fn parseControl(scratch: []u8, data: []const u8) !Control {
+    var fba: std.heap.FixedBufferAllocator = .init(scratch);
+    return std.json.parseFromSliceLeaky(Control, fba.allocator(), data, .{ .ignore_unknown_fields = true });
 }
 
 /// 接管一条已升级的 WebSocket：attach 到会话、转发输入与 resize，断开时 detach。
@@ -729,6 +734,9 @@ pub fn serve(
     };
     defer manager.detach(&att);
 
+    // 控制消息都很小，用固定栈缓冲解析，避免每条心跳都走 page_allocator。
+    var control_scratch: [1024]u8 = undefined;
+
     while (true) {
         const msg = ws.readSmallMessage() catch return;
         switch (msg.opcode) {
@@ -738,9 +746,7 @@ pub fn serve(
                 pty.writeAll(s.master, msg.data) catch return;
             },
             .text => {
-                var parsed = parseControl(std.heap.page_allocator, msg.data) catch continue;
-                defer parsed.deinit();
-                const control = parsed.value;
+                const control = parseControl(&control_scratch, msg.data) catch continue;
                 if (std.mem.eql(u8, control.t, "close")) {
                     manager.destroyAttached(&att);
                     return;
@@ -859,21 +865,21 @@ test "ring buffer keeps the newest bytes for arbitrary appends" {
 }
 
 test "control message parsing" {
-    var parsed = try parseControl(std.testing.allocator,
+    var scratch: [1024]u8 = undefined;
+    const parsed = try parseControl(&scratch,
         \\{"t":"resize","cols":120,"rows":40}
     );
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings("resize", parsed.value.t);
-    try std.testing.expectEqual(@as(?u16, 120), parsed.value.cols);
-    try std.testing.expectEqual(@as(?u16, 40), parsed.value.rows);
+    try std.testing.expectEqualStrings("resize", parsed.t);
+    try std.testing.expectEqual(@as(?u16, 120), parsed.cols);
+    try std.testing.expectEqual(@as(?u16, 40), parsed.rows);
 }
 
 test "unknown control fields are ignored" {
-    var parsed = try parseControl(std.testing.allocator,
+    var scratch: [1024]u8 = undefined;
+    const parsed = try parseControl(&scratch,
         \\{"t":"ping","extra":true}
     );
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings("ping", parsed.value.t);
+    try std.testing.expectEqualStrings("ping", parsed.t);
 }
 
 test "session id parsing rejects junk" {

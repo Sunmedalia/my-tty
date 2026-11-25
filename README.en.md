@@ -34,6 +34,11 @@ zig test src/tests.zig
 `build-release.sh` is equivalent to `zig build -Doptimize=safe && strip zig-out/bin/my-tty`.
 Deploy the stripped binary; do not install the Debug build (tens of MiB).
 
+Frontend assets are embedded at compile time, pre-compressed to gzip at startup
+(about 730 KiB -> 218 KiB overall; the font is already compressed), and tagged with a per-process ETag: browsers
+revalidate with `no-cache`, get a 304 on a hit, and automatically pick up new
+files after a restart.
+
 If `--password` is omitted, a random password is generated and printed to the
 terminal; it changes on restart.
 
@@ -284,8 +289,9 @@ logged:
 No HTTP access log; static asset requests produce nothing, and tickets/sessions
 in query strings never reach the log. The "unauthenticated" line distinguishes a
 real 401 from a plain network failure: it only appears when the server actually
-rejected the request. Behind a local reverse proxy the source IP is logged as
-`127.0.0.1` (`X-Forwarded-For` is not read).
+rejected the request, and it is limited to one line per source IP per second so
+anonymous requests cannot flood the journal. Behind a local reverse proxy the
+source IP is logged as `127.0.0.1` (`X-Forwarded-For` is not read).
 
 ## Security model
 
@@ -293,7 +299,9 @@ rejected the request. Behind a local reverse proxy the source IP is logged as
   `/api/*` and WebSocket requires a valid session**, otherwise 401.
 - Constant-time password comparison.
 - Request headers that take longer than 30 seconds are closed by the server
-  (slowloris); large uploads/downloads and WebSockets are exempt.
+  (slowloris); large uploads/downloads and WebSockets are exempt. File writes and
+  uploads get an overall limit of "32 KiB/s + 2 minutes", so a trickling body
+  cannot pin a connection and a temp file forever.
 - WebSocket requests with an `Origin` must match `Host`; one-time tickets are
   consumed on use, even when a cookie is also present.
 - All non-GET/HEAD requests with an `Origin` must match `Host` / a trusted

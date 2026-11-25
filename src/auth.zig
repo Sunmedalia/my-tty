@@ -18,6 +18,8 @@ pub const Auth = struct {
     password: []const u8,
     ttl_days: u32,
     idle_hours: u32,
+    /// 上一次命中的槽位；单用户/单浏览器时把常见的查找变成一次比较。
+    last_slot: usize = 0,
     mutex: Io.Mutex = .init,
     sessions: [max_sessions]Session = @splat(.{}),
     tickets: [max_tickets]Ticket = @splat(.{}),
@@ -121,22 +123,32 @@ pub const Auth = struct {
 
         const now = self.nowNs();
         const idle_limit = self.idleNs();
-        for (&self.sessions) |*s| {
-            if (!s.used) continue;
-            if (s.expires_ns <= now) {
-                s.used = false;
-                continue;
-            }
-            if (self.idle_hours != 0 and now - s.last_seen_ns > idle_limit) {
-                s.used = false;
-                continue;
-            }
-            if (config.constantTimeEql(&s.id, &raw)) {
-                s.last_seen_ns = now;
-                return true;
-            }
+
+        // 先看上次命中的槽位：一个浏览器一直开着时，几乎总是这里直接命中。
+        if (self.checkSession(self.last_slot, &raw, now, idle_limit)) return true;
+        for (0..self.sessions.len) |i| {
+            if (i == self.last_slot) continue;
+            if (self.checkSession(i, &raw, now, idle_limit)) return true;
         }
         return false;
+    }
+
+    /// 校验单个槽位；顺带清理过期/空闲会话，命中时刷新 last_seen。
+    fn checkSession(self: *Auth, i: usize, raw: *const [16]u8, now: i96, idle_limit: i96) bool {
+        const s = &self.sessions[i];
+        if (!s.used) return false;
+        if (s.expires_ns <= now) {
+            s.used = false;
+            return false;
+        }
+        if (self.idle_hours != 0 and now - s.last_seen_ns > idle_limit) {
+            s.used = false;
+            return false;
+        }
+        if (!config.constantTimeEql(&s.id, raw)) return false;
+        s.last_seen_ns = now;
+        self.last_slot = i;
+        return true;
     }
 
     /// 为 WebSocket 升级签发一次性短票据：浏览器无法给 WS 请求加自定义头，
@@ -324,6 +336,16 @@ test "full session table evicts the least recently used session" {
     try std.testing.expect(auth.validate(&cookies[0]));
     try std.testing.expect(auth.validate(&extra.cookie));
     try std.testing.expect(!auth.validate(&cookies[1]));
+}
+
+test "validate switches between two sessions" {
+    const io = std.testing.io;
+    var auth = Auth.init(io, "pw", 7, 24);
+    const a = auth.login("pw").?.cookie;
+    const b = auth.login("pw").?.cookie;
+    try std.testing.expect(auth.validate(&a));
+    try std.testing.expect(auth.validate(&b));
+    try std.testing.expect(auth.validate(&a));
 }
 
 test "zero ttl expires immediately" {
