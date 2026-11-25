@@ -1,6 +1,6 @@
 name: release
 
-# 打 v* tag 时自动构建多架构包并发布；也可以在 Actions 里对已有 tag 手动触发
+# 打 v* tag 时自动构建并发布；也可以在 Actions 里对已有 tag 手动触发
 # （选 main 分支运行，tag 填 v0.1.0，构建的仍是该 tag 的代码）。
 on:
   push:
@@ -23,20 +23,17 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 全部在目标架构的原生 runner 上编译，不用交叉编译、不用 qemu。
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-linux
+          - runner: ubuntu-latest
             arch: x86_64
-          - target: aarch64-linux
+          - runner: ubuntu-24.04-arm
             arch: aarch64
-            platform: linux/arm64
-          - target: arm-linux-musleabihf
-            arch: armv7
-            platform: linux/arm/v7
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,16 +42,9 @@ jobs:
         with:
           version: 0.17.1
       - name: build
-        run: ./scripts/build-release.sh ${{ matrix.target }}
-      - uses: docker/setup-qemu-action@v3
-        if: matrix.platform
-        with:
-          platforms: all
-      - name: runtime check under qemu
-        if: matrix.platform
-        run: |
-          docker run --rm --platform ${{ matrix.platform }} \
-            -v "$PWD:/w" -w /w alpine:3.20 /w/zig-out/bin/my-tty --check-config
+        run: ./scripts/build-release.sh
+      - name: runtime check
+        run: ./zig-out/bin/my-tty --check-config
       - name: package
         run: |
           set -euo pipefail

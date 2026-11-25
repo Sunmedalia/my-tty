@@ -37,9 +37,10 @@ takes an optional Zig target (`aarch64-linux`, `arm-linux-musleabihf`, ...), so
 the host `strip` does not need to understand the target format. Deploy the
 stripped binary; do not install the Debug build (tens of MiB).
 
-Official releases are built by GitHub Actions on `v*` tags: static x86_64,
-aarch64 and armv7 binaries, each cross-compiled, launched once under qemu
-(`--check-config`), then published automatically.
+Official releases are built by GitHub Actions on `v*` tags: static x86_64 and
+aarch64 binaries, each compiled on a native runner of that architecture and
+launched once (`--check-config`), then published automatically. There is no
+32-bit ARM runner; use the cross-compile target above if you need one.
 
 Frontend assets are embedded at compile time, pre-compressed to gzip at startup
 (about 730 KiB -> 218 KiB overall; the font is already compressed), and tagged with a per-process ETag: browsers
