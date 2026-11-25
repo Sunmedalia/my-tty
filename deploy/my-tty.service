@@ -10,6 +10,10 @@ User=my-tty
 Group=my-tty
 WorkingDirectory=/srv/work
 
+# 运行前必须存在这个用户/组和目录（见 README）：
+#   useradd --system --user-group --create-home --home-dir /srv/work --shell /bin/bash my-tty
+#   install -d -o my-tty -g my-tty -m 750 /srv/work
+#
 # 密码不要写在 ExecStart 里（会出现在 ps 和 journal 中），放配置文件：
 #   /etc/my-tty/my-tty.json，权限 0640 root:my-tty
 ExecStartPre=/usr/local/bin/my-tty --config /etc/my-tty/my-tty.json --check-config

@@ -69,10 +69,14 @@ zig test src/tests.zig
 仓库里有 `deploy/my-tty.service`。它是普通的 systemd unit：单二进制直接跑，
 不用 Docker、不用容器、不需要任何运行时依赖。
 
+unit 里的 `User=my-tty`、`Group=my-tty`、`WorkingDirectory=/srv/work` 都要求
+这个用户、组和目录已经存在。先创建它们，再启用服务：
+
 ```sh
 ./scripts/build-release.sh              # 先构建 ReleaseSafe + strip
 sudo install -Dm755 zig-out/bin/my-tty /usr/local/bin/my-tty
-sudo useradd --system --create-home --home-dir /srv/work --shell /bin/bash my-tty
+sudo useradd --system --user-group --create-home --home-dir /srv/work --shell /bin/bash my-tty
+sudo install -d -o my-tty -g my-tty -m 750 /srv/work
 sudo install -d -o root -g my-tty -m 750 /etc/my-tty
 sudo install -m640 -o root -g my-tty my-tty.example.json /etc/my-tty/my-tty.json
 sudoedit /etc/my-tty/my-tty.json        # 至少改 password / shell
@@ -85,6 +89,7 @@ journalctl -u my-tty -f
 - 密码放在 `/etc/my-tty/my-tty.json`（`0640 root:my-tty`），不要写进 `ExecStart`，
   否则会出现在 `ps` 和 journal 里。
 - 服务以专用用户 `my-tty` 运行，家目录是 `/srv/work`；终端里能做的事都以该用户权限为准。
+  `WorkingDirectory` 只是进程 cwd，shell 实际从用户家目录启动，文件面板从 `/` 开始。
 - 启动前会先执行 `--check-config`，配置有问题时直接失败，不会带着坏配置跑。
 - 默认只监听 `127.0.0.1`；需要远程访问用 SSH 端口转发或外部反向代理，TLS 不在本项目里。
 - 停止时 `KillMode=mixed` 只给主进程发 SIGTERM，由程序自己回收所有 PTY。
