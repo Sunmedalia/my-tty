@@ -514,6 +514,9 @@ button.icon {
   overflow-y: auto;
   flex: 1 1 auto;
   min-height: 0;
+  /* 和终端 .xterm-viewport 保持同一种细滚动条。 */
+  scrollbar-width: thin;
+  scrollbar-color: #333a48 transparent;
 }
 
 #file-list ul {
