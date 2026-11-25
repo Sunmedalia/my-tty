@@ -27,11 +27,17 @@ zig test src/tests.zig
 ./zig-out/bin/my-tty --port 7387 --password 'change-me'
 # 浏览器打开 http://127.0.0.1:7387/ ，在弹窗里输入密码
 
-./scripts/build-release.sh   # 发布：ReleaseSafe + strip，约 1.7 MiB
+./scripts/build-release.sh                # 发布：ReleaseSafe + strip，约 1.4 MiB
+./scripts/build-release.sh aarch64-linux  # 交叉编译到 ARM64
 ```
 
-`build-release.sh` 等价于 `zig build -Doptimize=safe && strip zig-out/bin/my-tty`。
-部署时用这个 strip 过的二进制，不要装十几 MiB 的 Debug 版本。
+`build-release.sh` 等价于 `zig build -Doptimize=safe -Dstrip=true`，可以带一个
+Zig target 参数交叉编译（`aarch64-linux`、`arm-linux-musleabihf` 等），不需要
+宿主机的 `strip` 认识目标格式。部署时用这个 strip 过的二进制，不要装十几 MiB
+的 Debug 版本。
+
+正式 release 由 GitHub Actions 在打 `v*` tag 时构建：x86_64、aarch64、armv7
+三个静态二进制，交叉编译后用 qemu 跑一次 `--check-config`，再自动创建 release。
 
 前端资源在编译期嵌入，启动时把可压缩资源预压缩成 gzip（整体约 730 KiB → 218 KiB，字体本身已是压缩格式），并生成
 本进程唯一的 ETag：浏览器用 `no-cache` 每次校验，命中回 304，重启后自动失效。

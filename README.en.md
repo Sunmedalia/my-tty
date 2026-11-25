@@ -28,11 +28,18 @@ zig test src/tests.zig
 ./zig-out/bin/my-tty --port 7387 --password 'change-me'
 # open http://127.0.0.1:7387/ and enter the password in the dialog
 
-./scripts/build-release.sh   # release: ReleaseSafe + strip, ~1.7 MiB
+./scripts/build-release.sh                # release: ReleaseSafe + strip, ~1.4 MiB
+./scripts/build-release.sh aarch64-linux  # cross-compile for ARM64
 ```
 
-`build-release.sh` is equivalent to `zig build -Doptimize=safe && strip zig-out/bin/my-tty`.
-Deploy the stripped binary; do not install the Debug build (tens of MiB).
+`build-release.sh` is equivalent to `zig build -Doptimize=safe -Dstrip=true` and
+takes an optional Zig target (`aarch64-linux`, `arm-linux-musleabihf`, ...), so
+the host `strip` does not need to understand the target format. Deploy the
+stripped binary; do not install the Debug build (tens of MiB).
+
+Official releases are built by GitHub Actions on `v*` tags: static x86_64,
+aarch64 and armv7 binaries, each cross-compiled, launched once under qemu
+(`--check-config`), then published automatically.
 
 Frontend assets are embedded at compile time, pre-compressed to gzip at startup
 (about 730 KiB -> 218 KiB overall; the font is already compressed), and tagged with a per-process ETag: browsers
