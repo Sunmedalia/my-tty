@@ -19,13 +19,6 @@ const session = @import("session.zig");
 const fsapi = @import("fsapi.zig");
 const util = @import("util.zig");
 
-const security_headers = [_]http.Header{
-    .{ .name = "x-content-type-options", .value = "nosniff" },
-    .{ .name = "referrer-policy", .value = "no-referrer" },
-    .{ .name = "x-frame-options", .value = "DENY" },
-    .{ .name = "content-security-policy", .value = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" },
-};
-
 /// HTTP 阶段等待请求头的空闲上限（秒）。
 ///
 /// 不能用 SO_RCVTIMEO 做超时：std.Io.Threaded 的 netRead 把 EAGAIN 当成
@@ -378,7 +371,7 @@ fn handleHttp(
     // 只有登录和文件写入/上传会读取请求体。其余路径一旦带 body 就直接关闭，
     // 既不 drain 一个可能永远发不完的 body，也不给 std.http 的 keep-alive
     // 逻辑机会把残余字节解释成下一个请求。
-    if (requestHasBody(request) and !acceptsRequestBody(path, request.head.method)) {
+    if (util.requestHasBody(request) and !acceptsRequestBody(path, request.head.method)) {
         return respondClose(request, "{\"error\":\"unexpected_body\"}\n", .bad_request);
     }
 
@@ -418,7 +411,7 @@ fn handleHttp(
             std.debug.print("注销 peer={s}\n", .{peerText(&pb, peer)});
             return handleLogout(auth_state, trust_forwarded, request);
         }
-        if (std.mem.eql(u8, path, "/api/auth/status")) return handleStatus(auth_state, request);
+        if (std.mem.eql(u8, path, "/api/auth/status")) return handleStatus(request);
         if (std.mem.eql(u8, path, "/api/auth/ticket")) return handleTicket(auth_state, request);
         if (std.mem.startsWith(u8, path, "/api/fs/")) return fsapi.handle(io, gpa, request);
         return respond(request, "{\"error\":\"not_found\"}\n", .not_found);
@@ -476,7 +469,7 @@ fn handleLogin(
     const body = reader.allocRemaining(gpa, .limited(4096)) catch
         return respondClose(request, "{\"error\":\"bad_body\"}\n", .bad_request);
     defer gpa.free(body);
-    if (!requestBodyComplete(request))
+    if (!util.bodyComplete(request))
         return respondClose(request, "{\"error\":\"bad_body\"}\n", .bad_request);
 
     var parsed = std.json.parseFromSlice(LoginRequest, gpa, body, .{ .ignore_unknown_fields = true }) catch
@@ -529,8 +522,7 @@ fn handleLogout(auth_state: *auth.Auth, trust_forwarded: bool, request: *http.Se
 
 fn handleTicket(auth_state: *auth.Auth, request: *http.Server.Request) !void {
     if (request.head.method != .POST) return respond(request, "method not allowed\n", .method_not_allowed);
-    const ticket = auth_state.issueTicket() orelse
-        return respond(request, "{\"error\":\"out_of_tickets\"}\n", .service_unavailable);
+    const ticket = auth_state.issueTicket();
 
     var buf: [64]u8 = undefined;
     const json = std.fmt.bufPrint(&buf, "{{\"ticket\":\"{s}\"}}", .{ticket}) catch
@@ -538,8 +530,7 @@ fn handleTicket(auth_state: *auth.Auth, request: *http.Server.Request) !void {
     return respond(request, json, .ok);
 }
 
-fn handleStatus(auth_state: *auth.Auth, request: *http.Server.Request) !void {
-    _ = auth_state; // 能走到这里说明路由前已经校验过会话
+fn handleStatus(request: *http.Server.Request) !void {
     if (request.head.method != .GET) return respond(request, "method not allowed\n", .method_not_allowed);
     return respond(request, "{\"authenticated\":true}", .ok);
 }
@@ -627,19 +618,6 @@ fn originAllowed(request: *const http.Server.Request, trust_forwarded: bool) boo
     return std.ascii.eqlIgnoreCase(trimmed, expected);
 }
 
-fn requestHasBody(request: *const http.Server.Request) bool {
-    if (request.head.transfer_encoding != .none) return true;
-    if (request.head.content_length) |len| return len != 0;
-    return false;
-}
-
-fn requestBodyComplete(request: *const http.Server.Request) bool {
-    return switch (request.server.reader.state) {
-        .ready => true,
-        else => false,
-    };
-}
-
 /// 只允许这些端点自己读取 body；其余请求体一律拒绝。
 fn acceptsRequestBody(path: []const u8, method: http.Method) bool {
     if (std.mem.eql(u8, path, "/api/auth/login")) return method == .POST;
@@ -677,8 +655,8 @@ fn respondClose(request: *http.Server.Request, body: []const u8, status: http.St
 }
 
 fn buildHeaders(dst: []http.Header, extra: []const http.Header) []const http.Header {
-    std.debug.assert(dst.len >= extra.len + security_headers.len);
+    std.debug.assert(dst.len >= extra.len + util.security_headers.len);
     @memcpy(dst[0..extra.len], extra);
-    @memcpy(dst[extra.len..][0..security_headers.len], &security_headers);
-    return dst[0 .. extra.len + security_headers.len];
+    @memcpy(dst[extra.len..][0..util.security_headers.len], &util.security_headers);
+    return dst[0 .. extra.len + util.security_headers.len];
 }

@@ -58,8 +58,9 @@ fn argsContain(args: []const [:0]const u8, needle: []const u8) bool {
 fn describe(err: config.Config.ParseError) []const u8 {
     return switch (err) {
         error.UnknownArgument => "未知参数",
-        error.MissingValue => "参数缺少取值",
-        error.InvalidPort => "端口或并发数不合法",
+        error.InvalidPort => "端口不合法",
+        error.InvalidNumber => "数字不合法（需要非负整数）",
+        error.InvalidMaxSessions => "会话数上限至少为 1",
         error.InvalidHost => "监听地址必须是 IPv4 字面量",
         error.EmptyPassword => "密码不能为空",
         error.InvalidSessionTtl => "登录有效期必须在 1–365 天，空闲超时不得超过 8760 小时",

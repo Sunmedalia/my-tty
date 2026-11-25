@@ -21,11 +21,6 @@ pub const Pty = struct {
     master: posix.fd_t,
     /// shell 的 pid（同时也是会话首进程）。
     child: posix.pid_t,
-
-    pub fn close(p: *Pty) void {
-        _ = linux.close(p.master);
-        p.master = -1;
-    }
 };
 
 pub const SpawnError = error{
@@ -34,7 +29,6 @@ pub const SpawnError = error{
     PtyNumberFailed,
     OpenSlaveFailed,
     ForkFailed,
-    ShellPathTooLong,
 } || std.mem.Allocator.Error;
 
 pub const SpawnOptions = struct {

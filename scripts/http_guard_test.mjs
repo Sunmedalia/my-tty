@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // HTTP 请求边界回归：残余 body 不能被当成下一个请求；未登录的慢 body 必须立即关闭。
-// 用法: node http_guard_test.mjs <http-base>
+// 用法: node http_guard_test.mjs <http-base> <password>
 
 import net from "node:net";
 

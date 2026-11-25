@@ -1209,10 +1209,6 @@ button.icon {
 
 /* ------------------------------------------------------------ splitters */
 
-#workspace {
-  position: relative;
-}
-
 .splitter {
   position: absolute;
   z-index: 4;

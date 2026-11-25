@@ -33,8 +33,9 @@ pub const Config = struct {
 
     pub const ParseError = error{
         UnknownArgument,
-        MissingValue,
         InvalidPort,
+        InvalidNumber,
+        InvalidMaxSessions,
         InvalidHost,
         EmptyPassword,
         InvalidSessionTtl,
@@ -43,6 +44,7 @@ pub const Config = struct {
         ConfigReadFailed,
         ConfigInvalid,
         OutOfMemory,
+        /// 由 `args.toSlice` 的 `try` 传播上来（例如参数不是合法 UTF-8）。
         Unexpected,
     };
 
@@ -172,7 +174,7 @@ pub const Config = struct {
         // 只接受 IPv4 字面量：不做 DNS，配置越简单越好。
         _ = net.IpAddress.parseIp4(cfg.host, cfg.port) catch return error.InvalidHost;
         if (cfg.port == 0) return error.InvalidPort;
-        if (cfg.max_sessions == 0) return error.InvalidPort;
+        if (cfg.max_sessions == 0) return error.InvalidMaxSessions;
         if (cfg.password) |p| {
             if (p.len == 0) return error.EmptyPassword;
         }
@@ -246,11 +248,7 @@ fn parsePort(text: []const u8) Config.ParseError!u16 {
 }
 
 fn parseCount(text: []const u8) Config.ParseError!u32 {
-    return std.fmt.parseInt(u32, text, 10) catch return error.InvalidPort;
-}
-
-pub fn isLoopback(host: []const u8) bool {
-    return std.mem.startsWith(u8, host, "127.");
+    return std.fmt.parseInt(u32, text, 10) catch return error.InvalidNumber;
 }
 
 /// 定长时间比较，避免 token 逐字节泄漏长度/前缀。
@@ -259,13 +257,6 @@ pub fn constantTimeEql(a: []const u8, b: []const u8) bool {
     var diff: u8 = 0;
     for (a, b) |x, y| diff |= x ^ y;
     return diff == 0;
-}
-
-test "loopback detection" {
-    try std.testing.expect(isLoopback("127.0.0.1"));
-    try std.testing.expect(isLoopback("127.9.9.9"));
-    try std.testing.expect(!isLoopback("0.0.0.0"));
-    try std.testing.expect(!isLoopback("10.0.0.1"));
 }
 
 test "constant time equality" {

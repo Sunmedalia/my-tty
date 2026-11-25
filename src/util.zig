@@ -2,6 +2,30 @@
 //! 单独放一个文件，测试时就不必把静态资源和整个 server 拉进来。
 
 const std = @import("std");
+const http = std.http;
+
+/// 所有响应共用的安全头。API 和静态资源都带上，避免两套路由逐渐走偏。
+pub const security_headers = [_]http.Header{
+    .{ .name = "x-content-type-options", .value = "nosniff" },
+    .{ .name = "referrer-policy", .value = "no-referrer" },
+    .{ .name = "x-frame-options", .value = "DENY" },
+    .{ .name = "content-security-policy", .value = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" },
+};
+
+/// 请求是否声明了 body（Transfer-Encoding 或非 0 Content-Length）。
+pub fn requestHasBody(request: *const http.Server.Request) bool {
+    if (request.head.transfer_encoding != .none) return true;
+    if (request.head.content_length) |len| return len != 0;
+    return false;
+}
+
+/// body 是否已经被完整读走；没读完就不能复用这条连接。
+pub fn bodyComplete(request: *const http.Server.Request) bool {
+    return switch (request.server.reader.state) {
+        .ready => true,
+        else => false,
+    };
+}
 
 pub fn pathOnly(target: []const u8) []const u8 {
     const end = std.mem.indexOfAny(u8, target, "?#") orelse target.len;

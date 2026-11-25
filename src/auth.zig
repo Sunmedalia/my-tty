@@ -141,7 +141,7 @@ pub const Auth = struct {
 
     /// 为 WebSocket 升级签发一次性短票据：浏览器无法给 WS 请求加自定义头，
     /// 又不想把长期会话放进 URL。票据 30 秒有效、用一次即废。
-    pub fn issueTicket(self: *Auth) ?[32]u8 {
+    pub fn issueTicket(self: *Auth) [32]u8 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -336,7 +336,7 @@ test "zero ttl expires immediately" {
 test "ticket is one time" {
     const io = std.testing.io;
     var auth = Auth.init(io, "pw", 7, 24);
-    const ticket = auth.issueTicket().?;
+    const ticket = auth.issueTicket();
     try std.testing.expect(auth.consumeTicket(&ticket));
     try std.testing.expect(!auth.consumeTicket(&ticket));
     try std.testing.expect(!auth.consumeTicket("nope"));

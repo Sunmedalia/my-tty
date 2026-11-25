@@ -177,7 +177,7 @@ fn write(io: Io, gpa: Allocator, arena: Allocator, request: *http.Server.Request
     };
     defer gpa.free(body);
     // 客户端可能在 Content-Length 之前就断开；不能把半截内容写进目标文件。
-    if (!bodyComplete(request)) return failClose(request, arena, .bad_request, "bad_body");
+    if (!util.bodyComplete(request)) return failClose(request, arena, .bad_request, "bad_body");
 
     const abs = resolveNew(io, arena, rel) catch |err| return failMapped(request, arena, err);
 
@@ -297,7 +297,7 @@ fn uploadSingle(io: Io, arena: Allocator, rel: []const u8, request: *http.Server
     }
 
     // 同上：body 不完整时保留临时文件，不要覆盖目标文件。
-    if (!bodyComplete(request)) return failClose(request, arena, .bad_request, "bad_body");
+    if (!util.bodyComplete(request)) return failClose(request, arena, .bad_request, "bad_body");
 
     atomic.replace(io) catch |err| return failMapped(request, arena, err);
 
@@ -736,24 +736,19 @@ fn entryLessThan(_: void, a: Entry, b: Entry) bool {
     return std.mem.lessThan(u8, a.name, b.name);
 }
 
-fn requestHasBody(request: *const http.Server.Request) bool {
-    if (request.head.transfer_encoding != .none) return true;
-    if (request.head.content_length) |len| return len != 0;
-    return false;
-}
-
 /// body 没读干净就关连接，避免 std.http 为了 keep-alive 去 drain 一个
 /// 可能已经被客户端截断的 body（那会触发断言并中止整个进程）。
 fn keepAliveForRequest(request: *const http.Server.Request) bool {
-    if (!requestHasBody(request)) return true;
-    return bodyComplete(request);
+    if (!util.requestHasBody(request)) return true;
+    return util.bodyComplete(request);
 }
 
-fn bodyComplete(request: *const http.Server.Request) bool {
-    return switch (request.server.reader.state) {
-        .ready => true,
-        else => false,
-    };
+/// JSON / 固定文本响应的头：和 server.zig 的静态资源用同一套安全头。
+fn apiHeaders(buf: *[2 + util.security_headers.len]http.Header) []const http.Header {
+    buf[0] = .{ .name = "content-type", .value = "application/json; charset=utf-8" };
+    buf[1] = .{ .name = "cache-control", .value = "no-store" };
+    @memcpy(buf[2..], &util.security_headers);
+    return buf;
 }
 
 fn respondJson(request: *http.Server.Request, alloc: Allocator, status: http.Status, value: anytype) anyerror!void {
@@ -772,28 +767,20 @@ fn respondJsonKeepAlive(
     std.json.Stringify.value(value, .{}, &out.writer) catch
         return respondStatic(request, .internal_server_error, "{\"error\":\"json_encode_failed\"}");
 
-    var headers = [_]http.Header{
-        .{ .name = "content-type", .value = "application/json; charset=utf-8" },
-        .{ .name = "cache-control", .value = "no-store" },
-        .{ .name = "x-content-type-options", .value = "nosniff" },
-    };
+    var header_buf: [2 + util.security_headers.len]http.Header = undefined;
     return request.respond(out.written(), .{
         .status = status,
-        .extra_headers = &headers,
+        .extra_headers = apiHeaders(&header_buf),
         .keep_alive = keep_alive,
     });
 }
 
 /// 不经过 JSON 编码 / 分配器的固定响应，避免 OOM 时递归调用自身。
 fn respondStatic(request: *http.Server.Request, status: http.Status, body: []const u8) !void {
-    var headers = [_]http.Header{
-        .{ .name = "content-type", .value = "application/json; charset=utf-8" },
-        .{ .name = "cache-control", .value = "no-store" },
-        .{ .name = "x-content-type-options", .value = "nosniff" },
-    };
+    var header_buf: [2 + util.security_headers.len]http.Header = undefined;
     return request.respond(body, .{
         .status = status,
-        .extra_headers = &headers,
+        .extra_headers = apiHeaders(&header_buf),
         .keep_alive = keepAliveForRequest(request),
     });
 }

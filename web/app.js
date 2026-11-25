@@ -82,7 +82,7 @@
   let splitY = parseFloat(localStorage.getItem("myttty.splitY") || "0.5") || 0.5;
   let filesWidth = parseInt(localStorage.getItem("myttty.filesWidth") || "300", 10);
   if (!Number.isFinite(filesWidth)) filesWidth = 300;
-  let uploader = null; // { xhr, id, cancelled }
+  let uploader = null; // { xhr, url, cancelled }
 
   function clampFont(n) {
     return Math.min(24, Math.max(10, n));
