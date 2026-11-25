@@ -9,7 +9,7 @@
 | `addon-search.js` | `@xterm/addon-search` | 0.16.0 | MIT（见 `LICENSE.addon-search`） |
 | `addon-web-links.js` | `@xterm/addon-web-links` | 0.12.0 | MIT（见 `LICENSE.addon-web-links`） |
 
-## 为什么只用这两个
+## 为什么只需要这几个
 
 - xterm 6 的默认渲染器就是 **DOM renderer**（`CoreBrowserTerminal._createRenderer()` 直接
   实例化 `DomRenderer`），不需要、也不引入 WebGL/Canvas addon。

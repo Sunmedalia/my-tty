@@ -259,9 +259,10 @@ TLS 不属于本项目：请让进程只监听回环地址，把明文 HTTP/WS �
 
 ## 前端依赖
 
-`web/vendor/xterm/` 内是 `@xterm/xterm@6.0.0` 与 `@xterm/addon-fit@0.11.0`
-的构建产物（MIT，许可证同目录）。xterm 6 默认就是 DOM renderer，因此文本可以
-用浏览器原生方式选择与复制；没有引入 WebGL/Canvas addon。
+`web/vendor/xterm/` 内是 `@xterm/xterm@6.0.0`、`@xterm/addon-fit@0.11.0`、
+`@xterm/addon-search@0.16.0`、`@xterm/addon-web-links@0.12.0` 的构建产物
+（MIT，许可证同目录）。xterm 6 默认就是 DOM renderer，因此文本可以用浏览器
+原生方式选择与复制；没有引入 WebGL/Canvas addon。
 
 前端对 xterm 6.0 做了一处输入修补：Safari 和部分输入法（如中文输入法的英文模式）
 会让字符的 `input` 事件早于它自己的 `keydown`，xterm 用 `_keyDownSeen` 去重时会把

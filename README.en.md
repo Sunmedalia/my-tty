@@ -315,8 +315,9 @@ reverse-proxy config.
 
 ## Frontend dependencies
 
-`web/vendor/xterm/` contains build artifacts of `@xterm/xterm@6.0.0` and
-`@xterm/addon-fit@0.11.0` (MIT, licenses alongside). xterm 6 uses the DOM
+`web/vendor/xterm/` contains build artifacts of `@xterm/xterm@6.0.0`,
+`@xterm/addon-fit@0.11.0`, `@xterm/addon-search@0.16.0`, and
+`@xterm/addon-web-links@0.12.0` (MIT, licenses alongside). xterm 6 uses the DOM
 renderer by default, so text can be selected/copied natively; no WebGL/Canvas
 addon is included.
 
