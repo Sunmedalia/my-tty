@@ -41,6 +41,13 @@ zig test src/tests.zig
 ./zig-out/bin/my-tty --shell /bin/zsh --password 'change-me'
 ```
 
+终端里的 shell 是 **login shell**：家目录和身份按当前运行用户的 `/etc/passwd`
+解析，不单靠 `$HOME`，所以 systemd、`rc.local`、cron 这类 HOME 可能缺失、
+或 `sudo`/`su` 残留别人 HOME 的启动方式也能从正确的家目录开始。
+它会像 SSH 登录一样加载 `/etc/profile`、`~/.profile`（以及 zsh 的对应文件）
+和 `/etc/environment`，`PATH`、`EDITOR` 等变量不会丢；`--shell` 同时写入
+`$SHELL`。显式设置且可访问的 `$HOME` 仍然优先，方便临时目录和测试。
+
 ## 配置
 
 优先级：**默认值 < 配置文件 < 环境变量 < 命令行**。
@@ -91,7 +98,8 @@ journalctl -u my-tty -f
 - 密码放在 `/etc/my-tty/my-tty.json`（`0640 root:my-tty`），不要写进 `ExecStart`，
   否则会出现在 `ps` 和 journal 里。
 - 服务以专用用户 `my-tty` 运行，家目录是 `/srv/work`；终端里能做的事都以该用户权限为准。
-  `WorkingDirectory` 只是进程 cwd，shell 实际从用户家目录启动，文件面板从 `/` 开始。
+  `WorkingDirectory` 只是进程 cwd；shell 从 `/etc/passwd` 里该用户的家目录启动
+  （不依赖 `$HOME`），文件面板从 `/` 开始。
 - 启动前会先执行 `--check-config`，配置有问题时直接失败，不会带着坏配置跑。
 - 默认只监听 `127.0.0.1`；需要远程访问用 SSH 端口转发或外部反向代理，TLS 不在本项目里。
 - 停止时 `KillMode=mixed` 只给主进程发 SIGTERM，由程序自己回收所有 PTY。

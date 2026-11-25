@@ -43,6 +43,15 @@ Choose a shell:
 ./zig-out/bin/my-tty --shell /bin/zsh --password 'change-me'
 ```
 
+The shell inside the terminal is a **login shell**: its home directory and identity
+come from the running user's `/etc/passwd`, not just `$HOME`. That means startup via
+systemd, `rc.local`, or cron (where `HOME` may be missing) and `sudo`/`su` (where a
+foreign `HOME` may linger) still start in the correct home directory. Like an SSH
+login it loads `/etc/profile`, `~/.profile` (or the zsh equivalents), and
+`/etc/environment`, so `PATH`, `EDITOR`, and similar variables are present;
+`--shell` is also exported as `$SHELL`. An explicitly set, accessible `$HOME` still
+takes precedence, which keeps temporary directories and tests working.
+
 ## Configuration
 
 Precedence: **defaults < config file < environment < command line**.
@@ -95,8 +104,8 @@ journalctl -u my-tty -f
   `ExecStart`, where it would appear in `ps` and the journal.
 - The service runs as the dedicated `my-tty` user with home `/srv/work`;
   everything the terminal can do is bounded by that user. `WorkingDirectory`
-  is only the process cwd; the shell actually starts in the user's home
-  directory, and the file panel starts at `/`.
+  is only the process cwd; the shell starts in the home directory from
+  `/etc/passwd` for that user (not from `$HOME`), and the file panel starts at `/`.
 - `--check-config` runs before startup; a bad config fails the service instead
   of running with it.
 - Listens on `127.0.0.1` by default; for remote access use an SSH tunnel or an
