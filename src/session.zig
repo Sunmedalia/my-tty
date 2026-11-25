@@ -675,6 +675,7 @@ fn pump(s: *Session) void {
     var fds = [_]posix.pollfd{.{ .fd = s.master, .events = posix.POLL.IN, .revents = 0 }};
     // 500ms 一跳保证 stop 时的响应；cwd 每两跳查一次，空闲 /proc 读取减半。
     var idle_ticks: u8 = 0;
+    var last_cwd_ns: i96 = 0;
     while (!s.stopping.load(.acquire)) {
         fds[0].revents = 0;
         const ready = posix.poll(&fds, 500) catch break;
@@ -706,6 +707,14 @@ fn pump(s: *Session) void {
             }
         }
         s.mutex.unlock(io);
+
+        // `cd` 的提示符就是最后一块输出，没必要等下一次 500ms 空闲心跳才发现 cwd
+        // 变了。输出后最多每 100ms 查一次，持续刷屏时每秒也只多读 10 次 /proc。
+        const now_ns = Io.Clock.awake.now(io).nanoseconds;
+        if (now_ns - last_cwd_ns >= 100 * std.time.ns_per_ms) {
+            last_cwd_ns = now_ns;
+            refreshCwd(s, false);
+        }
     }
 
     const io = s.manager.io;

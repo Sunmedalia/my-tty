@@ -1176,9 +1176,17 @@
     el.addEventListener("pointercancel", up);
   }
 
-  async function refreshFiles() {
+  /// 重新读取树根、当前目录，以及调用方明确改动过的目录。
+  ///
+  /// 以前这里会把所有展开过的目录都重读一遍：浏览过十几个目录之后，一次上传
+  /// 就会重新拉取十几份列表（可能几 MB JSON）。终端里的 cwd 变化已经由
+  /// applyDir(force) 处理，这里只需要覆盖 UI 操作真正影响到的目录。
+  async function refreshFiles(touched) {
     notice("");
-    const dirs = new Set(["", currentDir, ...treeExpanded]);
+    const dirs = new Set(["", currentDir]);
+    for (const dir of touched || []) {
+      if (typeof dir === "string") dirs.add(dir);
+    }
     const failed = [];
     let truncated = false;
 
@@ -1211,9 +1219,23 @@
     if (truncated) notice("部分目录条目过多，仅显示前 1 万项");
   }
 
+  function sameEntries(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i].name !== b[i].name || a[i].kind !== b[i].kind || a[i].size !== b[i].size) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   async function loadDir(path) {
     const data = await api("GET", "list", { path });
     const result = { entries: data.entries || [], truncated: !!data.truncated };
+    const prev = treeChildren.get(path);
+    if (!prev || prev.truncated !== result.truncated || !sameEntries(prev.entries, result.entries)) {
+      treeDirty = true;
+    }
     treeChildren.set(path, result);
     return result;
   }
@@ -1244,16 +1266,17 @@
     if (!force && treeChildren.has(path)) return;
 
     treeLoading.add(path);
-    if (!treeChildren.has(path)) renderTree();
+    if (!treeChildren.has(path)) scheduleRender();
     try {
       const data = await loadDir(path);
       if (data.truncated) notice(`目录 ${path || "/"} 条目过多，仅显示前 1 万项`);
     } catch (err) {
       if (!treeChildren.has(path)) treeExpanded.delete(path);
+      treeDirty = true;
       notice(`列目录失败: ${err.message}`, true);
     } finally {
       treeLoading.delete(path);
-      renderTree();
+      scheduleRenderWhenIdle();
     }
   }
 
@@ -1358,29 +1381,48 @@
     }
   }
 
+  /// 合并同一轮里的多次渲染请求。
+  ///
+  /// 一次 cd 会同时加载 /、/tmp、/tmp/x… 多个目录，旧代码每加载完一个就整树
+  /// 重建一次；几千项的目录会因此重绘五到九次。这里用 20ms 防抖合并成一次。
+  let renderTimer = null;
+  /// 树的内容是否真的变了；批量的 force 重读如果内容没变就不再整树重建。
+  let treeDirty = false;
+  function scheduleRender() {
+    if (renderTimer) clearTimeout(renderTimer);
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      renderTree();
+    }, 20);
+  }
+
+  /// 一次操作通常会并行加载好几个目录；等最后一批都结束再重绘，避免
+  /// 每份列表回来都重建一次整棵树（3000 项时每次约 200ms）。
+  function scheduleRenderWhenIdle() {
+    if (treeLoading.size > 0) return;
+    if (!treeDirty) return;
+    scheduleRender();
+  }
+
   function renderTree() {
+    treeDirty = false;
     const scrollTop = fileList.scrollTop;
-    fileList.innerHTML = "";
     const root = treeChildren.get("");
     if (!root) {
-      const li = document.createElement("li");
-      li.className = "empty";
-      li.textContent = treeRootError ? "无法读取目录" : "加载中…";
-      fileList.appendChild(li);
+      fileList.innerHTML = `<li class="empty">${treeRootError ? "无法读取目录" : "加载中…"}</li>`;
       fileList.scrollTop = scrollTop;
       return;
     }
     if (root.entries.length === 0) {
-      const li = document.createElement("li");
-      li.className = "empty";
-      li.textContent = "（空目录）";
-      fileList.appendChild(li);
+      fileList.innerHTML = '<li class="empty">（空目录）</li>';
       fileList.scrollTop = scrollTop;
       return;
     }
-    for (const entry of root.entries) {
-      fileList.appendChild(renderNode("", entry));
-    }
+    // 一次 innerHTML 插入，而不是几千次 createElement + 每行五个监听器：
+    // 3000 项目录的同步渲染从约 460ms 降到约 100ms。交互统一用事件委托。
+    const out = [];
+    for (const entry of root.entries) treeHtml(out, "", entry);
+    fileList.innerHTML = out.join("");
     fileList.scrollTop = scrollTop;
   }
 
@@ -1401,135 +1443,61 @@
     }
   }
 
-  function renderNode(parentPath, entry) {
+  const htmlEscapes = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  function htmlEscape(text) {
+    return String(text).replace(/[&<>"']/g, (c) => htmlEscapes[c]);
+  }
+
+  /// 递归追加一棵子树的 HTML。`out` 是同一个数组，避免字符串反复拷贝。
+  function treeHtml(out, parentPath, entry) {
     const isDir = entry.kind === "directory";
     const path = joinPath(parentPath, entry.name);
-    const li = document.createElement("li");
-    li.className = "tree-node";
-
-    const row = document.createElement("div");
-    row.className = `entry ${isDir ? "directory" : "file"}`;
-    row.dataset.path = path;
-    row.classList.toggle("selected", isDir && path === currentDir);
-
-    if (isDir) {
-      const open = treeExpanded.has(path);
-      const caret = document.createElement("button");
-      caret.type = "button";
-      caret.className = "caret";
-      caret.classList.toggle("open", open);
-      caret.appendChild(iconNode("chevron"));
-      caret.title = open ? "折叠" : "展开";
-      caret.setAttribute("aria-label", caret.title);
-      caret.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        toggleDir(path);
-      });
-      row.appendChild(caret);
-    } else {
-      const spacer = document.createElement("span");
-      spacer.className = "caret-spacer";
-      row.appendChild(spacer);
-    }
-
-    const name = document.createElement("button");
-    name.type = "button";
-    name.className = "name";
-    name.textContent = entry.name;
-    name.title = entry.name;
-    name.addEventListener("click", () => {
-      if (isDir) selectDir(path);
-      else openEditor(path);
-    });
-    row.appendChild(name);
-
-    if (entry.kind === "file") {
-      const size = document.createElement("span");
-      size.className = "size";
-      size.textContent = humanSize(entry.size);
-      row.appendChild(size);
-    }
-
-    const actions = document.createElement("span");
-    actions.className = "actions";
+    const name = htmlEscape(entry.name);
+    const open = isDir && treeExpanded.has(path);
+    const selected = isDir && path === currentDir ? " selected" : "";
+    out.push(
+      `<li class="tree-node"><div class="entry ${isDir ? "directory" : "file"}${selected}" data-path="${htmlEscape(path)}" data-name="${name}">`
+    );
 
     if (isDir) {
-      actions.appendChild(
-        smallButton("download", "下载目录（tar）", () => downloadArchive(path, entry.name))
+      const title = open ? "折叠" : "展开";
+      out.push(
+        `<button type="button" class="caret${open ? " open" : ""}" data-act="toggle" title="${title}" aria-label="${title}"></button>`
       );
     } else {
-      actions.appendChild(smallButton("download", "下载", () => downloadFile(path, entry.name)));
+      out.push('<span class="caret-spacer"></span>');
     }
 
-    const renameBtn = smallButton("rename", "重命名", async () => {
-      const next = await askText("重命名", entry.name);
-      if (!next || next === entry.name) return;
-      const newPath = joinPath(parentPath, next);
-      try {
-        await api("POST", "rename", { from: path, to: newPath });
-        if (isDir) rebaseTree(path, newPath);
-        refreshFiles();
-      } catch (err) {
-        notice(`重命名失败: ${err.message}`, true);
-      }
-    });
-    actions.appendChild(renameBtn);
+    out.push(`<button type="button" class="name" data-act="open" title="${name}">${name}</button>`);
+    if (!isDir) out.push(`<span class="size">${humanSize(entry.size)}</span>`);
 
-    const delBtn = smallButton("delete", "删除", async () => {
-      if (!confirm(`删除 ${entry.name}？此操作不可撤销。`)) return;
-      try {
-        await api("DELETE", "delete", { path });
-        if (isDir) dropTreePath(path);
-        refreshFiles();
-      } catch (err) {
-        notice(`删除失败: ${err.message}`, true);
-      }
-    });
-    actions.appendChild(delBtn);
-    row.appendChild(actions);
+    out.push('<span class="actions">');
+    const downloadTitle = isDir ? "下载目录（tar）" : "下载";
+    out.push(
+      `<button type="button" class="icon" data-act="download" title="${downloadTitle}" aria-label="${downloadTitle}"></button>`
+    );
+    out.push(
+      `<button type="button" class="icon" data-act="rename" title="重命名" aria-label="重命名"></button>`
+    );
+    out.push(
+      `<button type="button" class="icon" data-act="delete" title="删除" aria-label="删除"></button>`
+    );
+    out.push("</span></div>");
 
-    if (isDir) {
-      row.addEventListener("dragover", (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        row.classList.add("drop-target");
-      });
-      row.addEventListener("dragleave", () => row.classList.remove("drop-target"));
-      row.addEventListener("drop", (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        row.classList.remove("drop-target");
-        if (ev.dataTransfer && ev.dataTransfer.files.length) {
-          uploadFiles(ev.dataTransfer.files, path);
-        }
-      });
-    }
-
-    li.appendChild(row);
-
-    if (isDir && treeExpanded.has(path)) {
-      const children = document.createElement("ul");
-      children.className = "tree-children";
+    if (open) {
+      out.push('<ul class="tree-children">');
       const data = treeChildren.get(path);
       if (!data) {
-        const empty = document.createElement("li");
-        empty.className = "empty";
-        empty.textContent = treeLoading.has(path) ? "加载中…" : "（未加载）";
-        children.appendChild(empty);
+        out.push(`<li class="empty">${treeLoading.has(path) ? "加载中…" : "（未加载）"}</li>`);
       } else if (data.entries.length === 0) {
-        const empty = document.createElement("li");
-        empty.className = "empty";
-        empty.textContent = "（空目录）";
-        children.appendChild(empty);
+        out.push('<li class="empty">（空目录）</li>');
       } else {
-        for (const child of data.entries) {
-          children.appendChild(renderNode(path, child));
-        }
+        for (const child of data.entries) treeHtml(out, path, child);
       }
-      li.appendChild(children);
+      out.push("</ul>");
     }
 
-    return li;
+    out.push("</li>");
   }
 
   const actionIcons = {
@@ -1553,25 +1521,100 @@
     return svg;
   }
 
-  function smallButton(icon, title, onClick) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "icon";
-    b.title = title;
-    b.setAttribute("aria-label", title);
-    b.appendChild(iconNode(icon));
-    b.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      onClick();
-    });
-    return b;
-  }
-
   function humanSize(n) {
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
     return `${(n / 1024 / 1024).toFixed(1)} MiB`;
   }
+
+  async function renameEntry(path, name, isDir) {
+    const next = await askText("重命名", name);
+    if (!next || next === name) return;
+    const parentPath = parentOf(path);
+    const newPath = joinPath(parentPath, next);
+    try {
+      await api("POST", "rename", { from: path, to: newPath });
+      if (isDir) rebaseTree(path, newPath);
+      refreshFiles([parentPath]);
+    } catch (err) {
+      notice(`重命名失败: ${err.message}`, true);
+    }
+  }
+
+  async function deleteEntry(path, name, isDir) {
+    if (!confirm(`删除 ${name}？此操作不可撤销。`)) return;
+    const parentPath = parentOf(path);
+    try {
+      await api("DELETE", "delete", { path });
+      if (isDir) dropTreePath(path);
+      refreshFiles([parentPath]);
+    } catch (err) {
+      notice(`删除失败: ${err.message}`, true);
+    }
+  }
+
+  // 文件树的所有点击都委托到 #file-list；拖放同理，只标记当前悬停的目录行。
+  fileList.addEventListener("click", (ev) => {
+    const actEl = ev.target.closest("[data-act]");
+    if (!actEl) return;
+    const row = actEl.closest(".entry");
+    if (!row) return;
+    const path = row.dataset.path;
+    const name = row.dataset.name || "";
+    const isDir = row.classList.contains("directory");
+    switch (actEl.dataset.act) {
+      case "toggle":
+        ev.stopPropagation();
+        toggleDir(path);
+        break;
+      case "open":
+        if (isDir) selectDir(path);
+        else openEditor(path);
+        break;
+      case "download":
+        ev.stopPropagation();
+        if (isDir) downloadArchive(path, name);
+        else downloadFile(path, name);
+        break;
+      case "rename":
+        ev.stopPropagation();
+        renameEntry(path, name, isDir);
+        break;
+      case "delete":
+        ev.stopPropagation();
+        deleteEntry(path, name, isDir);
+        break;
+    }
+  });
+
+  let dropRow = null;
+  function markDropRow(row) {
+    if (dropRow === row) return;
+    if (dropRow) dropRow.classList.remove("drop-target");
+    dropRow = row;
+    if (dropRow) dropRow.classList.add("drop-target");
+  }
+  fileList.addEventListener("dragover", (ev) => {
+    const row = ev.target.closest?.(".entry.directory") || null;
+    if (!row) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    markDropRow(row);
+  });
+  fileList.addEventListener("dragleave", (ev) => {
+    const row = ev.target.closest?.(".entry.directory");
+    if (row && !row.contains(ev.relatedTarget)) markDropRow(null);
+  });
+  fileList.addEventListener("drop", (ev) => {
+    const row = ev.target.closest?.(".entry.directory") || null;
+    markDropRow(null);
+    if (!row) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (ev.dataTransfer && ev.dataTransfer.files.length) {
+      uploadFiles(ev.dataTransfer.files, row.dataset.path);
+    }
+  });
 
   function downloadFile(path, name) {
     const a = document.createElement("a");
@@ -1712,7 +1755,7 @@
     if (failed === 0) notice(`已上传 ${done} 个文件`);
     else if (done > 0) notice(`上传完成 ${done} 个，失败 ${failed} 个`, true);
     if (targetDir) treeExpanded.add(targetDir);
-    refreshFiles();
+    refreshFiles([targetDir]);
   }
 
   // 应用内文本输入弹窗；返回 null 表示取消。
@@ -1774,10 +1817,11 @@
     if (!name) return;
     const path = joinPath(currentDir, name);
     try {
+      const parent = currentDir;
       await api("POST", "mkdir", { path });
       currentDir = path;
       treeExpanded.add(path);
-      refreshFiles();
+      refreshFiles([parent]);
     } catch (err) {
       notice(`新建目录失败: ${err.message}`, true);
     }
@@ -1817,7 +1861,7 @@
       editing.dirty = false;
       editorStateEl.textContent = `${res.size} 字节 · 已保存`;
       notice(`已保存 ${editing.path}`);
-      refreshFiles();
+      refreshFiles([parentOf(editing.path)]);
     } catch (err) {
       editorStateEl.textContent = `保存失败: ${err.message}`;
       notice(`保存失败: ${err.message}`, true);
@@ -1925,7 +1969,7 @@
     filesEl.hidden = !filesEl.hidden;
     filesResizeEl.hidden = filesEl.hidden;
     if (!filesEl.hidden) {
-      refreshFiles()
+      refreshFiles([...treeExpanded])
         .then(() => {
           if (!filesEl.hidden) scrollTreeToSelected(true);
         })
@@ -1933,7 +1977,7 @@
       requestAnimationFrame(() => panes.forEach(fitPane));
     }
   });
-  document.getElementById("files-refresh").addEventListener("click", refreshFiles);
+  document.getElementById("files-refresh").addEventListener("click", () => refreshFiles([...treeExpanded]));
   cwdSyncBtn.addEventListener("click", () => setCwdSync(!cwdSyncEnabled));
   setCwdSync(cwdSyncEnabled, false);
   document.getElementById("files-new-file").addEventListener("click", newFile);

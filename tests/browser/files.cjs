@@ -122,7 +122,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   fs.mkdirSync(path.join(ROOT, "arch"), { recursive: true });
   fs.writeFileSync(path.join(ROOT, "arch", "x.txt"), "ARCHIVE_X");
   await page.click("#files-refresh");
-  await page.waitForFunction(() => document.querySelector("#file-list").innerText.includes("arch"));
+  // 文件树用 content-visibility 跳过视口外的行，innerText 不含这些行；按行查询更稳。
+  await page.waitForFunction(
+    (rel) => !!document.querySelector(`#file-list .entry[data-path="${rel}"]`),
+    `${ROOT_REL}/arch`
+  );
   const dirRow = page.locator(rowFor(`${ROOT_REL}/arch`));
   await dirRow.locator(".caret").click();
   await page.locator(rowFor(`${ROOT_REL}/arch/x.txt`)).waitFor({ state: "visible", timeout: 8000 });
