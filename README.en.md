@@ -13,7 +13,7 @@ Status:
 | Login (modal / 7-day session / idle timeout / logout) | ✅ |
 | Connection limit, Origin checks, graceful shutdown | ✅ |
 | WebSocket ⇄ Linux PTY, real shell | ✅ |
-| Built-in session persistence (refresh/reconnect to the same shell, incremental replay) | ✅ |
+| Built-in session persistence (refresh/automatic reconnect to the same shell, incremental replay) | ✅ |
 | Multiple tabs, each with independent 1–4 panes and draggable splitters | ✅ |
 | Font size adjustment | ✅ |
 | Terminal search / links / mobile key bar | ✅ |
@@ -139,7 +139,15 @@ restrict normal terminal work.
   session cookie: `HttpOnly; SameSite=Strict; Path=/`, with `Secure` added
   automatically when a reverse proxy terminates HTTPS.
 - Sessions last **7 days** by default (`--session-ttl-days`, 1–365); the idle
-  timeout defaults to 24 hours (`--session-idle-hours`, 0 disables it).
+  timeout defaults to 24 hours (`--session-idle-hours`, 0 disables it). While the
+  page is open it re-checks `/api/auth/status` every 5 minutes to keep the
+  session alive: terminal keystrokes travel over the WebSocket and do not count
+  as HTTP requests, so without this heartbeat a page left open without reloading
+  would eventually hit the idle timeout.
+- A transient network failure (phone just unlocked, Wi-Fi reassociating) no
+  longer shows the password dialog: the page retries quietly and enters on its
+  own once the network is back. Only an explicit 401 from the server asks for the
+  password again.
 - "Logout" (left icon rail on desktop / top bar on mobile) clears both the
   server-side session and the cookie; all terminals close.
 - Sessions are in-memory: after a server restart you must log in again.
@@ -229,6 +237,17 @@ buffer.
 - Reloading the page or reconnecting after a network drop attaches back to the
   **same shell**; environment variables, cwd, and running programs are
   preserved. The server replays only the bytes the client missed.
+- The WebSocket carries an application-level heartbeat every 20 seconds. Half-open
+  connections caused by a locked phone, a Wi-Fi drop, or a sleeping laptop are
+  detected and **reconnected automatically**, with no need to click the status
+  bar. Background tabs pause the heartbeat so browser throttling is not mistaken
+  for a dead connection.
+- When another window takes over the same session, the old window receives close
+  code 4001 and shows "taken over by another window"; it does not auto-reconnect
+  and fight for the session. Click the status bar to take it back.
+- TCP keepalive is enabled (probe after 60 seconds idle, dead peer detected in
+  about 2 minutes), so a client that disappears without a FIN does not leave a
+  connection hanging on the server forever.
 - Replay never calls `reset()` or recreates the Terminal, so scroll position and
   text selection survive; copy/paste keeps working after an in-page reconnect.
 - After a disconnect the shell is kept for `--pty-idle-minutes` (default 30,
@@ -246,13 +265,18 @@ logged:
 
 - startup, exit, `accept` failures;
 - login success/failure (source IP only, never the password);
+- unauthenticated API/WebSocket requests (path, source IP, whether a cookie was
+  sent);
+- logout;
 - WebSocket connect/disconnect;
 - session create/reap (first 8 chars of the session id and the shell pid);
 - file write, upload, mkdir, rename, delete (path and byte count only).
 
 No HTTP access log; static asset requests produce nothing, and tickets/sessions
-in query strings never reach the log. Behind a local reverse proxy the source IP
-is logged as `127.0.0.1` (`X-Forwarded-For` is not read).
+in query strings never reach the log. The "unauthenticated" line distinguishes a
+real 401 from a plain network failure: it only appears when the server actually
+rejected the request. Behind a local reverse proxy the source IP is logged as
+`127.0.0.1` (`X-Forwarded-For` is not read).
 
 ## Security model
 
