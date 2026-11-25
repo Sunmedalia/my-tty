@@ -1,5 +1,7 @@
 # my-tty
 
+[English](README.en.md)
+
 单二进制的 Web 终端：Zig 提供 HTTP/WebSocket 与 Linux PTY，浏览器用 xterm.js
 的 **DOM 渲染器**显示终端。静态资源在编译期打进二进制，运行时不需要 Node/npm。
 
@@ -93,6 +95,28 @@ journalctl -u my-tty -f
 - 启动前会先执行 `--check-config`，配置有问题时直接失败，不会带着坏配置跑。
 - 默认只监听 `127.0.0.1`；需要远程访问用 SSH 端口转发或外部反向代理，TLS 不在本项目里。
 - 停止时 `KillMode=mixed` 只给主进程发 SIGTERM，由程序自己回收所有 PTY。
+
+### 直接用 root 运行（可选）
+
+如果机器只有你一个人用，并且希望登录后终端直接就是 root（不用 sudo），可以跳过专用用户：
+
+```sh
+sudo install -d -m 700 /etc/my-tty
+sudo install -m 600 my-tty.example.json /etc/my-tty/my-tty.json
+sudoedit /etc/my-tty/my-tty.json        # 至少改 password / shell
+```
+
+把 unit 里的 `User=my-tty` 改成 `User=root`，并删掉 `Group=` 和 `WorkingDirectory=`（或确保 `/srv/work` 存在）：
+
+```ini
+[Service]
+Type=simple
+User=root
+ExecStartPre=/usr/local/bin/my-tty --config /etc/my-tty/my-tty.json --check-config
+ExecStart=/usr/local/bin/my-tty --config /etc/my-tty/my-tty.json
+```
+
+这样 PTY 和文件 API 都是 root 权限，等价于直接用 root SSH 登录。不要保留 `User=my-tty` 却不创建该用户；root 模式下也不要启用 `ProtectSystem`/`PrivateTmp` 之类会限制终端的沙箱选项。
 
 ## 登录认证
 
