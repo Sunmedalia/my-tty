@@ -39,8 +39,10 @@ stripped binary; do not install the Debug build (tens of MiB).
 
 Official releases are built by GitHub Actions on `v*` tags: static x86_64 and
 aarch64 binaries, each compiled on a native runner of that architecture and
-launched once (`--check-config`), then published automatically. There is no
-32-bit ARM runner; use the cross-compile target above if you need one.
+launched once (`--check-config`), then published automatically. CI passes an
+explicit `-Dtarget` so the binaries use the architecture's baseline CPU, not the
+runner's instruction set. There is no 32-bit ARM runner; use the cross-compile
+target above if you need one.
 
 Frontend assets are embedded at compile time, pre-compressed to gzip at startup
 (about 730 KiB -> 218 KiB overall; the font is already compressed), and tagged with a per-process ETag: browsers

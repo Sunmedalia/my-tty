@@ -23,14 +23,18 @@ env:
 
 jobs:
   build:
-    # 全部在目标架构的原生 runner 上编译，不用交叉编译、不用 qemu。
+    # 在目标架构的原生 runner 上编译（不用交叉编译、不用 qemu），但显式传
+    # -Dtarget：不传会按 runner 的 CPU 特性（-mcpu=native）生成，发布包在
+    # 普通机器上可能 Illegal instruction。显式 target 使用该架构的 baseline。
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
+            target: x86_64-linux
             arch: x86_64
           - runner: ubuntu-24.04-arm
+            target: aarch64-linux
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -42,7 +46,7 @@ jobs:
         with:
           version: 0.17.1
       - name: build
-        run: ./scripts/build-release.sh
+        run: ./scripts/build-release.sh ${{ matrix.target }}
       - name: runtime check
         run: ./zig-out/bin/my-tty --check-config
       - name: package

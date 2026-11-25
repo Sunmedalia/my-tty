@@ -38,7 +38,9 @@ Zig target 参数交叉编译（`aarch64-linux`、`arm-linux-musleabihf` 等）�
 
 正式 release 由 GitHub Actions 在打 `v*` tag 时构建：x86_64 和 aarch64 两个静态
 二进制，分别在对应的原生 runner 上编译并直接跑一次 `--check-config`，再自动创建
-release。32 位 ARM 没有原生 runner，需要的话可以用上面的交叉编译参数自行构建。
+release。CI 里显式传 `-Dtarget`，用的是该架构的 CPU baseline，避免把 runner 的
+指令集特性带进发布包。32 位 ARM 没有原生 runner，需要的话可以用上面的交叉编译
+参数自行构建。
 
 前端资源在编译期嵌入，启动时把可压缩资源预压缩成 gzip（整体约 730 KiB → 218 KiB，字体本身已是压缩格式），并生成
 本进程唯一的 ETag：浏览器用 `no-cache` 每次校验，命中回 304，重启后自动失效。
