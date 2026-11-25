@@ -97,6 +97,16 @@ pass write
 curl -fsS -b "$COOKIE_JAR" "$API/read?path=$REL/note.txt" | grep -c 'smoke content' >/dev/null
 pass read
 
+# 大 JSON（文本文件读取、大目录列表）应压缩；解压后必须和明文完全一致。
+head -c 4096 /dev/zero | tr '\0' 'a' >"$UPLOAD_SRC"
+curl -fsS -X PUT -b "$COOKIE_JAR" --data-binary @"$UPLOAD_SRC" "$API/write?path=$REL/gzip.txt" >/dev/null
+cmp <(curl -fsS -b "$COOKIE_JAR" "$API/read?path=$REL/gzip.txt") \
+  <(curl -fsS --compressed -b "$COOKIE_JAR" "$API/read?path=$REL/gzip.txt")
+curl -sS -D - -o /dev/null -H 'Accept-Encoding: gzip' -b "$COOKIE_JAR" \
+  "$API/read?path=$REL/gzip.txt" | grep -qi '^content-encoding: gzip'
+curl -fsS -X DELETE -b "$COOKIE_JAR" "$API/delete?path=$REL/gzip.txt" >/dev/null
+pass "json gzip"
+
 echo "== fs hardening =="
 code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$API/upload?path=&id=deadbeef")
 [ "$code" = "400" ]

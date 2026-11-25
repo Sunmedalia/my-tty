@@ -1404,79 +1404,143 @@
     scheduleRender();
   }
 
-  function renderTree() {
-    treeDirty = false;
-    const scrollTop = fileList.scrollTop;
-    const root = treeChildren.get("");
-    if (!root) {
-      fileList.innerHTML = `<li class="empty">${treeRootError ? "无法读取目录" : "加载中…"}</li>`;
-      fileList.scrollTop = scrollTop;
-      return;
-    }
-    if (root.entries.length === 0) {
-      fileList.innerHTML = '<li class="empty">（空目录）</li>';
-      fileList.scrollTop = scrollTop;
-      return;
-    }
-    // 一次 innerHTML 插入，而不是几千次 createElement + 每行五个监听器：
-    // 3000 项目录的同步渲染从约 460ms 降到约 100ms。交互统一用事件委托。
-    const out = [];
-    for (const entry of root.entries) treeHtml(out, "", entry);
-    fileList.innerHTML = out.join("");
-    fileList.scrollTop = scrollTop;
-    syncTreeRowHeight();
-  }
+  // ---------------------------------------------------------------------
+  // 文件树：把展开后的树拍平成行，只渲染视口附近的一段。
+  // 3000 项的目录若整棵插入要 4 万个 DOM 节点（约 400ms）；这里固定只渲染
+  // 几十行，滚动时换窗口，总高度用上下两个等高占位行撑起来。
+  // ---------------------------------------------------------------------
 
-  // content-visibility 用估算行高布局被跳过的行；估算和真实值不一致会让
-  // 滚动位置在行真正渲染时跳动。行高对所有叶子行都一样，量一次即可。
-  let measuredRowHeight = 0;
-  let measuredTreeWidth = -1;
-  function syncTreeRowHeight() {
-    const width = fileList.clientWidth;
-    if (measuredRowHeight && width === measuredTreeWidth) return;
-    const row = fileList.querySelector(".entry");
-    if (!row) return;
-    const height = row.getBoundingClientRect().height;
-    // 面板隐藏时 rect 为 0；等下一次可见的渲染再量。
-    if (!(height > 0)) return;
-    measuredTreeWidth = width;
-    measuredRowHeight = height;
-    fileList.style.setProperty("--tree-row-height", `${height}px`);
-  }
-
-  function scrollTreeToSelected(alignTop = false) {
-    const sel = fileList.querySelector(".entry.selected");
-    if (!sel) return;
-    const list = fileList.getBoundingClientRect();
-    const row = sel.getBoundingClientRect();
-    if (alignTop) {
-      // cwd 同步时尽量把目标放到列表顶部，下面直接露出目录内容。
-      fileList.scrollTop = Math.max(0, fileList.scrollTop + (row.top - list.top) - 4);
-      return;
-    }
-    if (row.top < list.top) {
-      fileList.scrollTop -= list.top - row.top;
-    } else if (row.bottom > list.bottom) {
-      fileList.scrollTop += row.bottom - list.bottom;
-    }
-  }
+  /// 展开后的可见行；只在 treeChildren/treeExpanded 变化时重建。
+  let flatRows = [];
+  let flatDirty = true;
+  let windowStart = -1;
+  let windowEnd = -1;
 
   const htmlEscapes = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
   function htmlEscape(text) {
     return String(text).replace(/[&<>"']/g, (c) => htmlEscapes[c]);
   }
 
-  /// 递归追加一棵子树的 HTML。`out` 是同一个数组，避免字符串反复拷贝。
-  function treeHtml(out, parentPath, entry) {
-    const isDir = entry.kind === "directory";
-    const path = joinPath(parentPath, entry.name);
-    const name = htmlEscape(entry.name);
-    const open = isDir && treeExpanded.has(path);
-    const selected = isDir && path === currentDir ? " selected" : "";
-    out.push(
-      `<li class="tree-node"><div class="entry ${isDir ? "directory" : "file"}${selected}" data-path="${htmlEscape(path)}" data-name="${name}">`
-    );
+  function ensureFlat() {
+    if (!flatDirty) return;
+    flatDirty = false;
+    const rows = [];
+    const root = treeChildren.get("");
+    if (!root) {
+      rows.push({ kind: "status", text: treeRootError ? "无法读取目录" : "加载中…", depth: 0 });
+    } else if (root.entries.length === 0) {
+      rows.push({ kind: "status", text: "（空目录）", depth: 0 });
+    } else {
+      flatten(rows, "", 0);
+    }
+    flatRows = rows;
+  }
 
+  function flatten(rows, parentPath, depth) {
+    const data = treeChildren.get(parentPath);
+    if (!data) return;
+    for (const entry of data.entries) {
+      const isDir = entry.kind === "directory";
+      const path = joinPath(parentPath, entry.name);
+      const open = isDir && treeExpanded.has(path);
+      rows.push({ kind: "entry", path, name: entry.name, size: entry.size, isDir, open, depth });
+      if (!open) continue;
+      const children = treeChildren.get(path);
+      if (!children) {
+        rows.push({
+          kind: "status",
+          text: treeLoading.has(path) ? "加载中…" : "（未加载）",
+          depth: depth + 1,
+        });
+      } else if (children.entries.length === 0) {
+        rows.push({ kind: "status", text: "（空目录）", depth: depth + 1 });
+      } else {
+        flatten(rows, path, depth + 1);
+      }
+    }
+  }
+
+  // 行高由 CSS 变量决定（桌面 24px、窄屏 30px）；每行同高，滚动高度才能精确。
+  let rowHeightCache = 0;
+  function treeRowHeight() {
+    if (!rowHeightCache) {
+      const value = parseFloat(getComputedStyle(fileList).getPropertyValue("--tree-row-height"));
+      rowHeightCache = value > 0 ? value : 24;
+    }
+    return rowHeightCache;
+  }
+
+  /// 当前选中的目录在 flatRows 里的下标；没有就返回 -1。
+  function selectedIndex() {
+    for (let i = 0; i < flatRows.length; i += 1) {
+      const row = flatRows[i];
+      if (row.kind === "entry" && row.isDir && row.path === currentDir) return i;
+    }
+    return -1;
+  }
+
+  function renderTree() {
+    treeDirty = false;
+    // 结构变化会改变视口上方的行数（例如另一个大目录的列表晚到），只保留
+    // scrollTop 会让内容整体跳走。选中行还在视口附近时，记住它当时的位置，
+    // 重建后按新下标补回去。
+    const rowHeight = treeRowHeight();
+    const oldIndex = selectedIndex();
+    const offset = oldIndex >= 0 ? oldIndex * rowHeight - fileList.scrollTop : 0;
+    const visible = oldIndex >= 0 && offset >= -rowHeight && offset <= fileList.clientHeight;
+    flatDirty = true;
+    ensureFlat();
+    if (visible) {
+      const newIndex = selectedIndex();
+      if (newIndex >= 0) fileList.scrollTop = Math.max(0, newIndex * rowHeight - offset);
+    }
+    renderWindow(true);
+  }
+
+  /// 渲染 [start, end) 这一段行；上下用等高占位行补齐总高度。
+  function renderWindow(force) {
+    ensureFlat();
+    const rowHeight = treeRowHeight();
+    const total = flatRows.length;
+    const viewport = fileList.clientHeight;
+    const overscan = 20;
+    const start = Math.max(0, Math.min(total, Math.floor(fileList.scrollTop / rowHeight) - overscan));
+    const end = Math.max(
+      start,
+      Math.min(total, Math.ceil((fileList.scrollTop + viewport) / rowHeight) + overscan)
+    );
+    if (!force && start === windowStart && end === windowEnd) return;
+    windowStart = start;
+    windowEnd = end;
+
+    const out = [];
+    if (start > 0) {
+      out.push(`<li class="tree-spacer" style="height:${start * rowHeight}px" aria-hidden="true"></li>`);
+    }
+    for (let i = start; i < end; i += 1) out.push(rowHtml(flatRows[i]));
+    if (end < total) {
+      out.push(`<li class="tree-spacer" style="height:${(total - end) * rowHeight}px" aria-hidden="true"></li>`);
+    }
+
+    const scrollTop = fileList.scrollTop;
+    fileList.innerHTML = out.join("");
+    fileList.scrollTop = scrollTop;
+  }
+
+  function rowHtml(row) {
+    // 每层缩进 17px（原嵌套 ul 的 13px margin + 4px padding），并用 CSS 变量
+    // 告诉样式表要画多宽的祖先导引线。
+    const indent = 4 + row.depth * 17;
+    if (row.kind === "status") {
+      return `<li class="empty" style="padding-left:${indent}px">${row.text}</li>`;
+    }
+    const name = htmlEscape(row.name);
+    const isDir = row.isDir;
+    const open = row.open;
+    const selected = isDir && row.path === currentDir ? " selected" : "";
+    const out = [
+      `<li class="tree-node"><div class="entry ${isDir ? "directory" : "file"}${selected}" data-path="${htmlEscape(row.path)}" data-name="${name}" style="padding-left:${indent}px;--indent:${indent}px">`,
+    ];
     if (isDir) {
       const title = open ? "折叠" : "展开";
       out.push(
@@ -1485,38 +1549,64 @@
     } else {
       out.push('<span class="caret-spacer"></span>');
     }
-
     out.push(`<button type="button" class="name" data-act="open" title="${name}">${name}</button>`);
-    if (!isDir) out.push(`<span class="size">${humanSize(entry.size)}</span>`);
-
+    if (!isDir) out.push(`<span class="size">${humanSize(row.size)}</span>`);
     out.push('<span class="actions">');
     const downloadTitle = isDir ? "下载目录（tar）" : "下载";
     out.push(
       `<button type="button" class="icon" data-act="download" title="${downloadTitle}" aria-label="${downloadTitle}"></button>`
     );
     out.push(
-      `<button type="button" class="icon" data-act="rename" title="重命名" aria-label="重命名"></button>`
+      '<button type="button" class="icon" data-act="rename" title="重命名" aria-label="重命名"></button>'
     );
     out.push(
-      `<button type="button" class="icon" data-act="delete" title="删除" aria-label="删除"></button>`
+      '<button type="button" class="icon" data-act="delete" title="删除" aria-label="删除"></button>'
     );
-    out.push("</span></div>");
-
-    if (open) {
-      out.push('<ul class="tree-children">');
-      const data = treeChildren.get(path);
-      if (!data) {
-        out.push(`<li class="empty">${treeLoading.has(path) ? "加载中…" : "（未加载）"}</li>`);
-      } else if (data.entries.length === 0) {
-        out.push('<li class="empty">（空目录）</li>');
-      } else {
-        for (const child of data.entries) treeHtml(out, path, child);
-      }
-      out.push("</ul>");
-    }
-
-    out.push("</li>");
+    out.push("</span></div></li>");
+    return out.join("");
   }
+
+  function scrollTreeToSelected(alignTop = false) {
+    ensureFlat();
+    const rowHeight = treeRowHeight();
+    const index = selectedIndex();
+    if (index < 0) return;
+    const top = index * rowHeight;
+    if (alignTop) {
+      // cwd 同步时尽量把目标放到列表顶部，下面直接露出目录内容。
+      fileList.scrollTop = Math.max(0, top);
+    } else {
+      const viewTop = fileList.scrollTop;
+      const viewBottom = viewTop + fileList.clientHeight;
+      // 4px 是 #file-list 的 padding-top。
+      if (top + 4 < viewTop) fileList.scrollTop = top;
+      else if (top + 4 + rowHeight > viewBottom) {
+        fileList.scrollTop = top + 4 + rowHeight - fileList.clientHeight;
+      }
+    }
+    renderWindow(true);
+  }
+
+  // 滚动只换窗口；同一个动画帧里的多次滚动事件只处理一次。
+  let scrollFrame = 0;
+  fileList.addEventListener(
+    "scroll",
+    () => {
+      if (scrollFrame) return;
+      scrollFrame = requestAnimationFrame(() => {
+        scrollFrame = 0;
+        renderWindow(false);
+      });
+    },
+    { passive: true }
+  );
+
+  window.addEventListener("resize", () => {
+    rowHeightCache = 0;
+    windowStart = -1;
+    windowEnd = -1;
+    renderWindow(true);
+  });
 
   const actionIcons = {
     download: ["M8 2.5v8", "M4.5 7 8 10.5 11.5 7", "M3.5 13h9"],

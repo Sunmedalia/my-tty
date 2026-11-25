@@ -510,6 +510,8 @@ button.icon {
   list-style: none;
   margin: 0;
   padding: 4px;
+  /* 每行等高，虚拟滚动用行高计算总高度和窗口位置。触摸端在媒体查询里改大。 */
+  --tree-row-height: 24px;
   overflow-x: hidden;
   overflow-y: auto;
   flex: 1 1 auto;
@@ -525,22 +527,9 @@ button.icon {
   padding: 0;
 }
 
-#file-list .tree-children {
-  margin-left: 13px;
-  padding-left: 4px;
-  border-left: 1px solid #252b38;
-}
-
-#file-list .tree-node {
+#file-list .tree-node,
+#file-list .tree-spacer {
   list-style: none;
-}
-
-/* 只对“叶子行”（文件、折叠的目录）跳过视口外的布局：它们的行高一致。
-   展开的目录行高度包含整棵子树，不能按行高估算，否则滚动条会跳。
-   行高由 JS 实测一次写进 --tree-row-height，估算值与真实值完全一致。 */
-#file-list li.tree-node:not(:has(> .tree-children)) {
-  content-visibility: auto;
-  contain-intrinsic-size: var(--tree-row-height, 22px);
 }
 
 #file-list .entry .caret {
@@ -606,7 +595,7 @@ button.icon {
 }
 
 #file-list .entry.selected {
-  background: #222b3c;
+  background-color: #222b3c;
 }
 
 #file-list .entry.selected .name {
@@ -617,13 +606,21 @@ button.icon {
   display: flex;
   align-items: center;
   gap: 4px;
+  box-sizing: border-box;
+  height: var(--tree-row-height);
   min-width: 0;
+  /* 左右内边距由每行的缩进内联覆盖 padding-left。 */
   padding: 2px 4px;
   border-radius: 4px;
+  /* 拍平后的树用背景画每一层祖先的竖导引线（原来靠嵌套 ul 的左边框）。 */
+  background-image: repeating-linear-gradient(to right, #252b38 0 1px, transparent 1px 17px);
+  background-position: 13px 0;
+  background-size: max(0px, calc(var(--indent, 13px) - 13px)) 100%;
+  background-repeat: no-repeat;
 }
 
 #file-list .entry:hover {
-  background: #1c2231;
+  background-color: #1c2231;
 }
 
 #file-list .entry .name {
@@ -673,8 +670,12 @@ button.icon {
 }
 
 #file-list .empty {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: var(--tree-row-height);
+  padding: 0 8px;
   color: var(--dim);
-  padding: 10px;
 }
 
 #notice {
@@ -1302,7 +1303,7 @@ button.icon {
 }
 
 #file-list .entry.drop-target {
-  background: #222c3f;
+  background-color: #222c3f;
   outline: 1px dashed var(--accent);
   outline-offset: -1px;
 }
@@ -1434,6 +1435,10 @@ button.icon {
 
   #files-resize {
     flex-basis: 12px;
+  }
+
+  #file-list {
+    --tree-row-height: 30px;
   }
 
   #file-list .entry {

@@ -755,6 +755,9 @@ fn respondJson(request: *http.Server.Request, alloc: Allocator, status: http.Sta
     return respondJsonKeepAlive(request, alloc, status, value, keepAliveForRequest(request));
 }
 
+/// JSON 小于这个值时压缩的头比省下的字节还多，不值得。
+const min_json_gzip_bytes = 1024;
+
 fn respondJsonKeepAlive(
     request: *http.Server.Request,
     alloc: Allocator,
@@ -767,10 +770,36 @@ fn respondJsonKeepAlive(
     std.json.Stringify.value(value, .{}, &out.writer) catch
         return respondStatic(request, .internal_server_error, "{\"error\":\"json_encode_failed\"}");
 
-    var header_buf: [2 + util.security_headers.len]http.Header = undefined;
-    return request.respond(out.written(), .{
+    // 大目录列表和文本文件读取的 JSON 都是高度可压缩的文本：3000 项列表
+    // 约 131 KiB -> 20 KiB。压缩失败或反而更大时回退明文。
+    var body: []const u8 = out.written();
+    var gzipped: ?[]u8 = null;
+    if (body.len >= min_json_gzip_bytes and util.acceptsGzip(request)) {
+        if (util.gzipAlloc(alloc, body) catch null) |buf| {
+            if (buf.len < body.len) {
+                gzipped = buf;
+                body = buf;
+            } else alloc.free(buf);
+        }
+    }
+
+    var header_buf: [4 + util.security_headers.len]http.Header = undefined;
+    var n: usize = 0;
+    header_buf[n] = .{ .name = "content-type", .value = "application/json; charset=utf-8" };
+    n += 1;
+    header_buf[n] = .{ .name = "cache-control", .value = "no-store" };
+    n += 1;
+    if (gzipped != null) {
+        header_buf[n] = .{ .name = "content-encoding", .value = "gzip" };
+        n += 1;
+        header_buf[n] = .{ .name = "vary", .value = "accept-encoding" };
+        n += 1;
+    }
+    @memcpy(header_buf[n..][0..util.security_headers.len], &util.security_headers);
+    n += util.security_headers.len;
+    return request.respond(body, .{
         .status = status,
-        .extra_headers = apiHeaders(&header_buf),
+        .extra_headers = header_buf[0..n],
         .keep_alive = keep_alive,
     });
 }

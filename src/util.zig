@@ -23,6 +23,21 @@ pub noinline fn gzipAlloc(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 /// 所有响应共用的安全头。API 和静态资源都带上，避免两套路由逐渐走偏。
+/// `Accept-Encoding` 是否接受 gzip（忽略 q 值，只要出现 gzip 就当作可以）。
+pub fn acceptsGzip(request: *const http.Server.Request) bool {
+    var it = request.iterateHeaders();
+    while (it.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "accept-encoding")) continue;
+        var parts = std.mem.splitScalar(u8, header.value, ',');
+        while (parts.next()) |part| {
+            const semi = std.mem.indexOfScalar(u8, part, ';') orelse part.len;
+            const token = std.mem.trim(u8, part[0..semi], " \t");
+            if (std.ascii.eqlIgnoreCase(token, "gzip")) return true;
+        }
+    }
+    return false;
+}
+
 pub const security_headers = [_]http.Header{
     .{ .name = "x-content-type-options", .value = "nosniff" },
     .{ .name = "referrer-policy", .value = "no-referrer" },

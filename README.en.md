@@ -37,7 +37,9 @@ Deploy the stripped binary; do not install the Debug build (tens of MiB).
 Frontend assets are embedded at compile time, pre-compressed to gzip at startup
 (about 730 KiB -> 218 KiB overall; the font is already compressed), and tagged with a per-process ETag: browsers
 revalidate with `no-cache`, get a 304 on a hit, and automatically pick up new
-files after a restart.
+files after a restart. JSON API responses above 1 KiB are gzipped on demand as
+well (big directory listings and text file reads benefit most) and fall back to
+plain text when the client does not accept it.
 
 If `--password` is omitted, a random password is generated and printed to the
 terminal; it changes on restart.
@@ -175,7 +177,8 @@ The left "Files" panel starts at `/` and can browse the whole filesystem. Drag
 the splitter to resize it; double-click the splitter to restore the default
 width. The setting is stored in the browser. Directories are shown as a tree:
 click a directory name to select and expand it, click the triangle to
-collapse/expand. New files and uploads go to the currently selected directory;
+collapse/expand. Only the rows near the viewport are rendered, so directories
+with thousands of entries stay smooth. New files and uploads go to the currently selected directory;
 the breadcrumb at the top jumps directly to any level. When you `cd` in the
 terminal or run `pwd`, the panel follows the shell's cwd.
 The directory-follow toggle next to Refresh is on by default; turn it off and

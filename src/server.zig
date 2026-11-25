@@ -496,7 +496,7 @@ fn handleHttp(
     const asset = assets.find(path) orelse {
         return respond(request, "not found\n", .not_found);
     };
-    const use_gzip = asset.gzip != null and acceptsGzip(request);
+    const use_gzip = asset.gzip != null and util.acceptsGzip(request);
     const tag = assets.etag(use_gzip);
     if (ifNoneMatch(request, tag)) return respondNotModified(request, asset, tag);
 
@@ -517,20 +517,6 @@ fn handleHttp(
     var headers: [9]http.Header = undefined;
     const list = buildHeaders(&headers, extra[0..n]);
     return request.respond(if (use_gzip) asset.gzip.? else asset.body, .{ .extra_headers = list });
-}
-
-fn acceptsGzip(request: *const http.Server.Request) bool {
-    var it = request.iterateHeaders();
-    while (it.next()) |header| {
-        if (!std.ascii.eqlIgnoreCase(header.name, "accept-encoding")) continue;
-        var parts = std.mem.splitScalar(u8, header.value, ',');
-        while (parts.next()) |part| {
-            const semi = std.mem.indexOfScalar(u8, part, ';') orelse part.len;
-            const token = std.mem.trim(u8, part[0..semi], " \t");
-            if (std.ascii.eqlIgnoreCase(token, "gzip")) return true;
-        }
-    }
-    return false;
 }
 
 fn ifNoneMatch(request: *const http.Server.Request, tag: []const u8) bool {
