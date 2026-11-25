@@ -29,4 +29,4 @@ curl -L -o web/vendor/fonts/OFL.txt \
   https://raw.githubusercontent.com/JetBrains/JetBrainsMono/<tag>/OFL.txt
 ```
 
-升级后跑 `zig build test`、`scripts/smoke.sh`，并在浏览器里确认方框与 `█` 连续。
+升级后跑 `zig test src/tests.zig`、`scripts/smoke.sh`，并在浏览器里确认方框与 `█` 连续。

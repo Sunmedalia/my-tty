@@ -31,4 +31,4 @@ cp package/lib/addon-fit.js package/LICENSE web/vendor/xterm/LICENSE.addon-fit
 # cp package/lib/addon-web-links.js package/LICENSE web/vendor/xterm/LICENSE.addon-web-links
 ```
 
-升级后跑 `zig build test` 和 `scripts/smoke.sh`，并在浏览器里确认选择/复制仍然可用。
+升级后跑 `zig test src/tests.zig` 和 `scripts/smoke.sh`，并在浏览器里确认选择/复制仍然可用。
