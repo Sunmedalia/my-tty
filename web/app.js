@@ -1427,19 +1427,27 @@
   }
 
   function scrollTreeToSelected(alignTop = false) {
-    const sel = fileList.querySelector(".entry.selected");
-    if (!sel) return;
-    const list = fileList.getBoundingClientRect();
-    const row = sel.getBoundingClientRect();
-    if (alignTop) {
-      // cwd 同步时尽量把目标放到列表顶部，下面直接露出目录内容。
-      fileList.scrollTop = Math.max(0, fileList.scrollTop + (row.top - list.top) - 4);
-      return;
-    }
-    if (row.top < list.top) {
-      fileList.scrollTop -= list.top - row.top;
-    } else if (row.bottom > list.bottom) {
-      fileList.scrollTop += row.bottom - list.bottom;
+    // content-visibility 会让视口外的行按估算高度参与布局，一次修正可能不
+    // 到位；多量几次，等被跳过的行落进视口、拿到真实高度后再收敛。
+    for (let pass = 0; pass < 3; pass++) {
+      const sel = fileList.querySelector(".entry.selected");
+      if (!sel) return;
+      const list = fileList.getBoundingClientRect();
+      const row = sel.getBoundingClientRect();
+      if (alignTop) {
+        // cwd 同步时尽量把目标放到列表顶部，下面直接露出目录内容。
+        const gap = row.top - list.top - 4;
+        if (Math.abs(gap) <= 1) return;
+        fileList.scrollTop = Math.max(0, fileList.scrollTop + gap);
+        continue;
+      }
+      if (row.top < list.top) {
+        fileList.scrollTop -= list.top - row.top;
+      } else if (row.bottom > list.bottom) {
+        fileList.scrollTop += row.bottom - list.bottom;
+      } else {
+        return;
+      }
     }
   }
 

@@ -32,17 +32,25 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
       const el = document.querySelector("#crumb button.active");
       return el ? el.textContent : "";
     });
+  // 失败时带上步骤名：CI 只打印一行错误，没有 label 就不知道卡在哪。
+  const waitFor = async (label, fn, arg, timeout = 10000) => {
+    try {
+      await page.waitForFunction(fn, arg, { timeout });
+    } catch (err) {
+      throw new Error(`${label}: ${err.message}`);
+    }
+  };
   const waitCrumb = (name) =>
-    page.waitForFunction(
+    waitFor(
+      `crumb ${name}`,
       (want) => {
         const el = document.querySelector("#crumb button.active");
         return !!el && el.textContent === want;
       },
-      name,
-      { timeout: 10000 }
+      name
     );
 
-  await page.goto(BASE + "/");
+  await page.goto(BASE + "/?debug=1");
   await page.fill("#login-password", PASSWORD);
   await page.click("#login-submit");
   await page.waitForSelector(".pane .xterm");
@@ -54,14 +62,10 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.locator(".pane-term").click();
   await page.keyboard.type(`cd '${sub}'\r`);
   await waitCrumb("cwd-sub");
-  await page.waitForFunction(
-    () => {
-      const el = document.querySelector("#file-list .entry.selected");
-      return !!el && el.textContent.includes("cwd-sub");
-    },
-    null,
-    { timeout: 10000 }
-  );
+  await waitFor("selected cwd-sub", () => {
+    const el = document.querySelector("#file-list .entry.selected");
+    return !!el && el.textContent.includes("cwd-sub");
+  });
 
   // 手动把文件树切回根目录，再执行 pwd：树应重新跳到 shell 的 cwd。
   await page.locator("#crumb button").first().click();
@@ -75,19 +79,15 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await page.locator(".pane-term").click();
   await page.keyboard.type(`cd '${target}'\r`);
   await waitCrumb("mid-cwd-target");
-  await page.waitForFunction(
-    () => {
-      const list = document.querySelector("#file-list");
-      const sel = list.querySelector(".entry.selected");
-      if (!sel) return false;
-      const l = list.getBoundingClientRect();
-      const r = sel.getBoundingClientRect();
-      const gap = r.top - l.top;
-      return list.scrollTop > 0 && gap >= -1 && gap <= 12;
-    },
-    null,
-    { timeout: 10000 }
-  );
+  await waitFor("selected scrolled to top", () => {
+    const list = document.querySelector("#file-list");
+    const sel = list.querySelector(".entry.selected");
+    if (!sel) return false;
+    const l = list.getBoundingClientRect();
+    const r = sel.getBoundingClientRect();
+    const gap = r.top - l.top;
+    return list.scrollTop > 0 && gap >= -1 && gap <= 12;
+  });
 
   // 关闭目录跟随后，cd 不再移动文件树。
   const syncBgOn = await page.evaluate(
@@ -106,7 +106,12 @@ const assert = (c, m) => { if (!c) throw new Error("ASSERT: " + m); };
   await waitCrumb("/");
   await page.locator(".pane-term").click();
   await page.keyboard.type(`cd '${sub}'\r`);
-  await page.waitForTimeout(1200);
+  // 等 shell 真的 cd 完（服务端 cwd 已下发），否则重新开启同步时可能拿到旧值。
+  await waitFor(
+    "pane cwd while sync off",
+    (want) => window.__myttyDebug?.panes?.[0]?.cwd === want,
+    sub.replace(/^\/+/, "")
+  );
   assert((await activeCrumb()) === "/", "tree stays put when cwd sync is off");
 
   // 重新开启：立即对齐到 shell 当前目录，不需要等到下一次 cd。
