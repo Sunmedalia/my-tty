@@ -26,6 +26,11 @@ jobs:
           node-version-file: .nvmrc
       - name: format
         run: zig fmt --check build.zig src/*.zig web/embed.zig
+      - name: script syntax
+        run: |
+          node --check web/app.js
+          for f in tests/browser/*.cjs scripts/*.mjs; do node --check "$f"; done
+          for f in scripts/*.sh; do bash -n "$f"; done
       - name: build
         run: zig build
       - name: test
@@ -46,10 +51,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: tests/browser/package-lock.json
+      - name: cache playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('tests/browser/package-lock.json') }}
       - name: install browser deps
         working-directory: tests/browser
         run: |
           npm ci
-          npx playwright install --with-deps chromium
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            npx playwright install-deps chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
       - name: browser tests
         run: ./scripts/browser_test.sh

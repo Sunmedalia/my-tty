@@ -267,7 +267,10 @@ fn maintenance(io: Io, auth_state: *auth.Auth, manager: *session.Manager) void {
     var ticks: u32 = 0;
     // 1 秒一跳，便于 SIGTERM 时尽快 join；每 60 跳做一次清理。
     while (!shutting_down.load(.acquire)) {
-        Io.sleep(io, Io.Duration.fromSeconds(1), .real) catch return;
+        Io.sleep(io, Io.Duration.fromSeconds(1), .real) catch |err| {
+            std.debug.print("维护线程休眠失败: {t}，停止清理\n", .{err});
+            return;
+        };
         if (shutting_down.load(.acquire)) break;
         ticks += 1;
         sweepIdleConnections(io);
