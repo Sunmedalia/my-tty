@@ -12,3 +12,6 @@ tests/browser/node_modules/
 # 杂项
 .DS_Store
 *.log
+
+# 本地 agent 工作规则（不进仓库）
+AGENTS.md
